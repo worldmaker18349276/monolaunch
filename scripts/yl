@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+import sys
+from monolaunch.monoparam import load
+import warnings
+
+def formatwarning(message, category, filename, lineno, line=None): # type: ignore
+    return "".join(f"# {line}\n" for line in str(message).splitlines()) # type: ignore
+warnings.formatwarning = formatwarning
+
+c = load(sys.argv[1])
+sys.stderr.flush()
+print(c)
