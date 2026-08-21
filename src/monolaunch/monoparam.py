@@ -403,7 +403,7 @@ class SchemaRefLoopWarning(Warning):
         self.link = link
 
     def __str__(self):
-        return f"schema ref form a look: {self.link.relative_to(Path.cwd())}"
+        return f"schema refs form a loop: {self.link.relative_to(Path.cwd())}"
 
 class LoadSourceWarning(Warning):
     def __init__(self, path: Path):
@@ -418,15 +418,6 @@ class LinkAccessWarning(Warning):
     
     def __str__(self):
         return f"fail to access {self.link.relative_to(Path.cwd())}"
-
-class SchemaAccessWarning(Warning):
-    def __init__(self, link: Link, type: str, key: Union[int, str]):
-        self.link = link
-        self.type = type
-        self.key = key
-    
-    def __str__(self):
-        return f"fail to access key {self.key!r} in schema {self.link.relative_to(Path.cwd())}, it is {self.type}"
 
 class SchemaMismatchTypeWarning(Warning):
     def __init__(self, value_link: Link, value_type: str, schema_link: Link, schema_type: str):
@@ -487,14 +478,14 @@ class NotScalarNodeWarning(Warning):
         self.link = link
     
     def __str__(self):
-        return f"node {self.link.relative_to(Path.cwd())} is not scalar"
+        return f"node {self.link.relative_to(Path.cwd())} is not a scalar"
 
 class InvalidScalarWarning(Warning):
     def __init__(self, value: Any):
         self.value = value
     
     def __str__(self):
-        return f"{self.value} is not a scalar value"
+        return f"value {self.value} is not a scalar"
 
 class ManualSyncResourceWarning(Warning):
     def __init__(self, resource: Resource):
@@ -515,7 +506,7 @@ class SyncResourceSourceNotAbsoluteError(Exception):
         self.resource = resource
     
     def __str__(self):
-        return f"source path of sync resource is not absolute path: {self.resource}"
+        return f"source path of sync resource is not an absolute path: {self.resource}"
 
 class InvalidIncludeWarning(Warning):
     def __init__(self, value: Any):
@@ -553,12 +544,12 @@ class SyncFileNotReadyWarning(Warning):
     def __str__(self):
         return f"{self.which} yaml file is not ready"
 
-class InvalidDeletionSynchronizationWarning(Warning):
+class UnsupportedDeletionSynchronizationWarning(Warning):
     def __init__(self, fieldpath: FieldPath):
         self.fieldpath = fieldpath
     
     def __str__(self):
-        return f"try to delete field {self.fieldpath} and sync to original file, but it is invalid"
+        return f"try to delete field {self.fieldpath} and sync to original file, it is unsupported"
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 def raises(*exceptions: Type[BaseException]):
@@ -1082,7 +1073,7 @@ class SourceLoader:
             break
         return schema, depends
 
-    @raises(LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning)
+    @raises(LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def _resolve_schema(self, schema: SchemaSource, fieldpath: FieldPath) -> Tuple[Optional[SchemaSource], Set[Path]]:
         depends: Set[Path] = set()
         for key in fieldpath.elements:
@@ -1100,7 +1091,6 @@ class SourceLoader:
             if type_ == "struct":
                 assert isinstance(value, dict)
                 if key not in value:
-                    warnings.warn(SchemaAccessWarning(schema.link, type_, key))
                     return None, depends
                 schema = value[key]
                 continue
@@ -1108,7 +1098,6 @@ class SourceLoader:
             if type_ == "dict":
                 assert isinstance(value, SchemaSource)
                 if not isinstance(key, str):
-                    warnings.warn(SchemaAccessWarning(schema.link, type_, key))
                     return None, depends
                 schema = value
                 continue
@@ -1116,12 +1105,10 @@ class SourceLoader:
             if type_ == "array":
                 assert isinstance(value, SchemaSource)
                 if not isinstance(key, int):
-                    warnings.warn(SchemaAccessWarning(schema.link, type_, key))
                     return None, depends
                 schema = value
                 continue
 
-            warnings.warn(SchemaAccessWarning(schema.link, type_, key))
             return None, depends
 
         schema_, depends_ = self._resolve_schema_ref(schema)
@@ -1173,8 +1160,7 @@ class SourceLoader:
 
         return list(reversed(outputs)), list(reversed(schema_nodes)), depends
 
-    @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
-            SchemaAccessWarning)
+    @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def load(self, src: Link) -> Tuple[Optional[SourcedNode], Set[Path]]:
         """
         load yaml file, returns node and file dependencies of current node.
@@ -1207,8 +1193,7 @@ class SourceLoader:
         source = self._new_source(src)
         return SourcedNode(Link(src), [source], [])
 
-    @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
-            SchemaAccessWarning)
+    @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def get_(self, node: SourcedNode, fieldpath: Union[int, str, FieldPath]) -> Tuple[Optional[SourcedNode], Set[Path]]:
         """
         resolve given node until given path. returns the node of given path and its dependencies, or None for failure.
@@ -1236,8 +1221,7 @@ class SourceLoader:
 
         return SourcedNode(node.link / fieldpath, sources, schema_list), depends
 
-    @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
-            SchemaAccessWarning)
+    @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def get(self, node: SourcedNode, fieldpath: Union[int, str, FieldPath]) -> Optional[SourcedNode]:
         """
         resolve given node until given path. returns the node of given path, or None for failure.
@@ -1245,8 +1229,7 @@ class SourceLoader:
         return self.get_(node, fieldpath)[0]
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning,
-            IncompatibleMergeWarning)
+            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, IncompatibleMergeWarning)
     def resolve_all(self, node: SourcedNode, sync_resources: Optional[List[SyncResource]] = None) -> Tuple[JSON, Set[Path]]:
         """
         resolve full content of given node. returns resolved json object and its dependencies.
@@ -1287,8 +1270,7 @@ class SourceLoader:
             return value, depends
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning,
-            IncompatibleMergeWarning)
+            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, IncompatibleMergeWarning)
     def load_resolved(self, src: Link, sync_resources: Optional[List[SyncResource]]) -> Tuple[JSON, Set[Path]]:
         """
         load and resolve all.
@@ -1308,7 +1290,7 @@ class SourceLoader:
         access warning will be returned for failure.
         """
         # LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning,
-        # LinkAccessWarning, SchemaAccessWarning, IncompatibleMergeWarning
+        # LinkAccessWarning, IncompatibleMergeWarning
         with warnings.catch_warnings():
             warnings.simplefilter("always")
 
@@ -1331,8 +1313,7 @@ class SourceLoader:
 
         return None
 
-    @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
-            SchemaAccessWarning)
+    @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def _ensure_top_along(self, node: SourcedNode, fieldpath: FieldPath, ensure_null: bool = False) -> Optional[SourcedNode]:
         """
         ensure a given path can be accessed and will be stored at the file of current top layer.
@@ -1394,7 +1375,7 @@ class SourceLoader:
         return node
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
-            SchemaAccessWarning, IncompatibleMergeWarning, NotScalarNodeWarning,
+            IncompatibleMergeWarning, NotScalarNodeWarning,
             InvalidScalarWarning)
     def update(self, node: SourcedNode, folded_dict: JSONWithPath, machine: str = ""):
         """
@@ -1424,8 +1405,7 @@ class SourceLoader:
                 continue
             subnode.sources[-1].data = value
 
-    @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
-            SchemaAccessWarning)
+    @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def include(self, node: SourcedNode, folded_dict: JSONWithOnlyLink, machine: str = ""):
         """
         insert include sourced node by folded dictionary (keys are field paths, values are include paths).
@@ -1499,7 +1479,7 @@ class YAMLWatcher:
         return any(self.mtimes.get(depend, 0) != get_mtime(depend) for depend in self.depends)
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning,
+            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning,
             RootIsNotMapWarning)
     def load(self, aggregate_sync_resources: bool):
@@ -1671,7 +1651,7 @@ class YAMLSynchronizer:
         return status
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning,
+            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning,
             RootIsNotMapWarning, SyncFileNotReadyWarning)
     def resolve(self) -> Dict[FieldPath, JSON]:
@@ -1698,9 +1678,9 @@ class YAMLSynchronizer:
         return diff
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning,
+            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning,
-            RootIsNotMapWarning, InvalidDeletionSynchronizationWarning)
+            RootIsNotMapWarning, UnsupportedDeletionSynchronizationWarning)
     def back_resolve(self) -> Dict[Path, Dict[FieldPath, SourcedJSON]]:
         """
         back resolve resolved yaml file and update sourced yaml file.
@@ -1737,7 +1717,7 @@ class YAMLSynchronizer:
             for key, value in resolved_diff.items():
                 if value is None:
                     # TODO: try to delete standalone (not-merged) field
-                    warnings.warn(InvalidDeletionSynchronizationWarning(key))
+                    warnings.warn(UnsupportedDeletionSynchronizationWarning(key))
                 else:
                     update[str(key)] = as_JSONWithPath(value)
             assert self.original.node is not None
@@ -1771,7 +1751,7 @@ class YAMLSynchronizer:
             lisener(path, diff)
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning,
+            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning)
     def spin_once(self):
         if self.original.is_changed():
@@ -1784,7 +1764,7 @@ class YAMLSynchronizer:
                 self._back_resolved_listener(depend, diff)
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, SchemaAccessWarning,
+            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning)
     def spin(self, dt: float = 0.1):
         import time
