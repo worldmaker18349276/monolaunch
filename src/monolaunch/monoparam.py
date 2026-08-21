@@ -1022,10 +1022,11 @@ class SourceLoader:
             node = raw_source.data.get("$schema", None)
             if node is None:
                 raw_schema = None
-            elif not isinstance(node, dict) or not is_JSON(node):
-                # TODO: support $schema: /path/to/my.shema.json
+            elif not is_JSON(node):
                 warnings.warn(LoadSchemaWarning(Link(filepath) / "$schema"))
                 raw_schema = None
+            elif isinstance(node, str):
+                raw_schema = SchemaSource(Link(filepath) / "$schema", {"$ref": node})
             else:
                 raw_schema = SchemaSource(Link(filepath) / "$schema", assert_JSON(node))
         else:
