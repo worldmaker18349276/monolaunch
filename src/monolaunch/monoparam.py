@@ -1431,12 +1431,11 @@ class SourceLoader:
                     include = self.sync_resource_manager.attach_machine(include, machine)
                 source.data = include
 
-def load(link: Union[str, Link]) -> str:
+def resolve_YAML(link: Link) -> JSON:
     """
-    load and resolve yaml file, return resolved yaml content.
+    load and resolve yaml file, return resolved json.
     """
     loader = SourceLoader()
-    link = Link.parse(link) if isinstance(link, str) else link
     link = Link(link.filepath.resolve(), link.fieldpath)
 
     data = None
@@ -1444,8 +1443,8 @@ def load(link: Union[str, Link]) -> str:
     if node is not None:
         data, _depends = loader.resolve_all(node)
 
-    data = deep_copy_skip_empty(data)
-    return yaml.dump(data, Dumper=SimpleYAMLDumper, sort_keys=False)
+    return data
+
 
 def get_mtime(path: Path) -> int:
     try:
@@ -1777,7 +1776,7 @@ class YAMLSynchronizer:
             status = status_
             time.sleep(dt)
 
-def resolve(source_path: Union[str, Path], aggregate_sync_resources: bool = True) -> str:
+def save_resolved(source_path: Union[str, Path], aggregate_sync_resources: bool = True) -> str:
     """
     resolve yaml file, save as {name}.resolved.yaml.
     if aggregate_sync_resources is true, it will append field "$sync_resources" at the root.

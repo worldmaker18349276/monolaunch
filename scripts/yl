@@ -1,12 +1,28 @@
 #!/usr/bin/env python3
 import sys
-from monolaunch.monoparam import load
 import warnings
+import yaml
+from monolaunch.monoparam import SourceLoader, Link, deep_copy_skip_empty, SimpleYAMLDumper
 
 def formatwarning(message, category, filename, lineno, line=None): # type: ignore
-    return "".join(f"# {line}\n" for line in str(message).splitlines()) # type: ignore
+    return "".join(
+        f"# {'     ' if i else 'WARN:'} {line}\n"
+        for i, line in enumerate(str(message).splitlines()) # type: ignore
+    )
 warnings.formatwarning = formatwarning
 
-c = load(sys.argv[1])
+link = sys.argv[1]
+link = Link.parse(link)
+link = Link(link.filepath.resolve(), link.fieldpath)
+
+loader = SourceLoader()
+node, _depends = loader.load(link)
+data = None
+if node is not None:
+    data, _depends = loader.resolve_all(node)
+data = deep_copy_skip_empty(data)
+
+data_str = yaml.dump(data, Dumper=SimpleYAMLDumper, sort_keys=False)
+
 sys.stderr.flush()
-print(c)
+print(data_str)

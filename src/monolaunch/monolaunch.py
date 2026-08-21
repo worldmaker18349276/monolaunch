@@ -850,7 +850,7 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
             launch_el.append(ET.Element("arg", dict(name="monoparam_source", default=str(ctx().params_filepath))))
             launch_el.append(ET.Element("param", dict(name="$monoparam_source", type="str", value="$(arg monoparam_source)")))
 
-            resolved_param_expr = f"__import__('monolaunch').monoparam.resolve(monoparam_source)"
+            resolved_param_expr = f"__import__('monolaunch').monoparam.save_resolved(monoparam_source)"
             launch_el.append(ET.Element("arg", dict(name="resolved_param_expr", default=resolved_param_expr)))
             launch_el.append(ET.Element("arg", dict(name="resolved_param", default="$(eval eval(resolved_param_expr))")))
 
