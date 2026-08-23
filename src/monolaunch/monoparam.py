@@ -707,6 +707,8 @@ class SchemaSource:
                   "type": "boolean" | "integer" | "number" | "string"
                 }
               | { "type": "null" }         // null
+              | { "enum": [ (<value>,)* ] }   // enumerated values
+              | { "const": <value> }          // constant values
     """
     
     link: Link
@@ -722,14 +724,20 @@ class SchemaSource:
             return Link.parse(ref)
         return None
 
-    # get type (any/struct/dict/array/null/scalar/unknown)
-    # and value (None/struct item types/dict value type/array value type/scalar type/None)
+    # get type (any/struct/dict/array/null/scalar/enum/unknown)
+    # and value (None/struct item types/dict value type/array value type/scalar type/valid values/None)
     def access(self) -> Tuple[
-        Literal["any", "struct", "dict", "array", "null", "scalar", "unknown"],
-        Union[None, Dict[str, "SchemaSource"], "SchemaSource", type]
+        Literal["any", "struct", "dict", "array", "null", "scalar", "enum", "unknown"],
+        Union[None, Dict[str, "SchemaSource"], "SchemaSource", type, List[Any]]
     ]:
         if isinstance(self.node, dict) and not self.node:
             return "any", None
+
+        if isinstance(self.node, dict) and isinstance(enum := self.node.get("enum"), list):
+            return "enum", enum
+
+        if isinstance(self.node, dict) and "const" in self.node:
+            return "enum", [self.node["const"]]
 
         if isinstance(self.node, dict):
             node_type = self.node.get("type", "")
@@ -921,6 +929,10 @@ class SourcedNode:
             assert isinstance(schema_value, type)
             return isinstance(value, schema_value)
 
+        if schema_type == "enum":
+            assert isinstance(schema_value, list)
+            return value in schema_value
+
         return False
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, SchemaMismatchScalarWarning)
@@ -969,7 +981,7 @@ class SourcedNode:
                 if schema_type == "any":
                     continue
 
-                if schema_type == "scalar":
+                if schema_type == "scalar" or schema_type == "enum":
                     if isinstance(value, Resource):
                         value = str(value)
                     else:
