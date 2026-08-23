@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import warnings
+import argparse
 import yaml
 from monolaunch.monoparam import SourceLoader, Link, deep_copy_skip_empty, SimpleYAMLDumper
 
@@ -11,8 +12,13 @@ def formatwarning(message, category, filename, lineno, line=None): # type: ignor
     )
 warnings.formatwarning = formatwarning
 
-link = sys.argv[1]
-link = Link.parse(link)
+parser = argparse.ArgumentParser("yaml loader")
+parser.add_argument("--skip-empty", action="store_true", help="skip null and empty mapping")
+# TODO: --keep-tags: leave unknown tag untouched
+parser.add_argument("link", help="link of yaml file to load")
+args = parser.parse_args()
+
+link = Link.parse(args.link)
 link = Link(link.filepath.resolve(), link.fieldpath)
 
 loader = SourceLoader()
@@ -20,7 +26,8 @@ node, _depends = loader.load(link)
 data = None
 if node is not None:
     data, _depends = loader.resolve_all(node)
-data = deep_copy_skip_empty(data)
+if args.skip_empty:
+    data = deep_copy_skip_empty(data)
 
 data_str = yaml.dump(data, Dumper=SimpleYAMLDumper, sort_keys=False)
 
