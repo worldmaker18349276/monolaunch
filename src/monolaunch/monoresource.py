@@ -5,6 +5,7 @@ it uses commands: ssh, sshpass, rsync
 """
 from inspect import cleandoc
 import re
+import shlex
 import subprocess
 import dataclasses
 from pathlib import Path
@@ -96,13 +97,8 @@ class Machine:
 
 def remote_expandvars(machine: Machine, path: str) -> str:
     password_args = ["sshpass", "-p", machine.password] if machine.password else []
-    remote_args = ["ssh", f"{machine.user}@{machine.address}" if machine.user else machine.address] if machine.address else []
-    env_loader_args = [machine.env_loader] if machine.env_loader else []
-
-    result = subprocess.run([
-        *password_args,
-        *remote_args,
-        *env_loader_args,
+    remote_args = ["ssh", f"{machine.user}@{machine.address}" if machine.user else machine.address] if machine.address else ["bash", "-c"]
+    remote_cmd = [
         "python3", "-c",
         "; ".join([
             "import os",
@@ -110,6 +106,14 @@ def remote_expandvars(machine: Machine, path: str) -> str:
             "os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))",
             f"print(os.path.expandvars({str(path)!r}), end='')"
         ])
+    ]
+    if machine.env_loader:
+        remote_cmd = [machine.env_loader, *remote_cmd]
+
+    result = subprocess.run([
+        *password_args,
+        *remote_args,
+        shlex.join(remote_cmd),
     ], capture_output=True, text=True, check=True)
     return result.stdout
 
@@ -120,13 +124,13 @@ def rsync(source: str, destination: str, machine: Machine, check_only: bool):
     if Path(source).exists() and Path(source).is_dir():
         source = str(Path(source)) + "/"
 
-    remote_args = ["ssh", f"{machine.user}@{machine.address}" if machine.user else machine.address] if machine.address else []
+    remote_args = ["ssh", f"{machine.user}@{machine.address}" if machine.user else machine.address] if machine.address else ["bash", "-c"]
     dst_parent = str(Path(destination).parent)
     print(f"create parent directory {dst_parent}")
     subprocess.run([
         *password_args,
         *remote_args,
-        "mkdir", "-p", dst_parent,
+        shlex.join(["mkdir", "-p", dst_parent]),
     ], check=True)
 
     destination_ = (f"{machine.user}@" if machine.user else "") + (f"{machine.address}:" if machine.address else "") + destination
@@ -185,7 +189,7 @@ def sync(params_link: str):
             raise TypeError(f"{curr_link}/destination is not str")
         
         check_only = bool(resource.get("check_only", False))
-            
+        
         machine = Machine.parse(param_machine)
         machine = machine.reduce_local()
 
