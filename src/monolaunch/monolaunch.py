@@ -217,7 +217,7 @@ import urllib.parse
 import shlex
 from uuid import uuid4
 import yaml
-from structmapper.yaml_utils import JSON, FieldPath, Link
+from monolaunch.yaml_utils import JSON, FieldPath, Link
 from . import monoparam
 from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 

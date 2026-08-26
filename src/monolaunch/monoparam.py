@@ -7,7 +7,7 @@ import urllib.parse
 from pathlib import Path
 from dataclasses import dataclass, field
 import warnings
-from structmapper.yaml_utils import *
+from monolaunch.yaml_utils import *
 
 
 JSONWithPath = Union[None, JSONScalar, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]

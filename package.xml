@@ -7,7 +7,6 @@
   <license>TODO</license>
 
   <buildtool_depend>catkin</buildtool_depend>
-  <depend>structmapper</depend>
   <build_depend>rospy</build_depend>
   <exec_depend>rospy</exec_depend>
 

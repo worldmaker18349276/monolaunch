@@ -1,0 +1,28 @@
+# call `python3 -m monolaunch.yaml_utils <this file>`
+
+simple_include: !include base.yaml
+
+nested_include: !include nested.yaml
+
+merged:
+  !merge
+  - !include defaults.yaml
+  - !include override.yaml
+  - retries: 10
+    debug: true
+
+custom_tag: !custom
+  value: preserved
+
+custom_scalar: !custom "hello"
+
+ordinary:
+  string: hello
+  integer: 42
+  float: 3.14
+  boolean: true
+  null_value: null
+  list:
+    - one
+    - two
+    - three

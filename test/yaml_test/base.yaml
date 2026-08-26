@@ -1,0 +1,12 @@
+name: base
+version: 1
+timeout: 10
+retries: 3
+
+robot:
+  type: wheeled
+  speed: 1.0
+
+features:
+  logging: true
+  metrics: false

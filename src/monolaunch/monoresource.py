@@ -12,7 +12,7 @@ import socket
 import ipaddress
 
 import urllib.parse
-from structmapper.yaml_utils import JSON, assert_JSON, Link, load_YAML
+from monolaunch.yaml_utils import JSON, assert_JSON, Link, load_YAML
 
 
 def assert_mapping(data: JSON) -> Dict[str, JSON]:

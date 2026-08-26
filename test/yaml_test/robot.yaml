@@ -1,0 +1,11 @@
+name: robot
+version: 2
+retries: 5
+
+robot:
+  type: quadruped
+  speed: 2.0
+
+features:
+  metrics: true
+  camera: true
