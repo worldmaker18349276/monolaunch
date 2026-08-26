@@ -1,4 +1,5 @@
 from enum import Enum
+from inspect import cleandoc
 from typing import Any, Dict, Generator, List, Literal, Tuple, Set, Union, Optional, Type, TypeVar, Callable, IO, overload
 import sys
 import math
@@ -1805,3 +1806,9 @@ def save_resolved(source_path: Union[str, Path], aggregate_sync_resources: bool 
     sync.init()
     sync.resolve()
     return str(resolved_path)
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("usage: python -m monolaunch.monoparam <source yaml file>\n" + cleandoc(save_resolved.__doc__ or ""), file=sys.stderr)
+        exit(1)
+    save_resolved(sys.argv[1])

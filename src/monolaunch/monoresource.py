@@ -3,6 +3,7 @@ sync resources before launch, so that resources can be managed in single place.
 
 it uses commands: ssh, sshpass, rsync
 """
+from inspect import cleandoc
 import re
 import subprocess
 import dataclasses
@@ -195,3 +196,10 @@ def sync(params_link: str):
     return True
 
 __all__ = ["sync"]
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 2:
+        print("usage: python -m monolaunch.monoresource <param link>\n" + cleandoc(sync.__doc__ or ""), file=sys.stderr)
+        exit(1)
+    sync(sys.argv[1])

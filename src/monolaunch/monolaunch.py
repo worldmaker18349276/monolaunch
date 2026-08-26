@@ -850,7 +850,7 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
             launch_el.append(ET.Element("arg", dict(name="monoparam_source", default=str(ctx().params_filepath))))
             launch_el.append(ET.Element("param", dict(name="$monoparam_source", type="str", value="$(arg monoparam_source)")))
 
-            resolved_param_expr = f"__import__('monolaunch').monoparam.save_resolved(monoparam_source)"
+            resolved_param_expr = f"__import__('monolaunch.monoparam').monoparam.save_resolved(monoparam_source)"
             launch_el.append(ET.Element("arg", dict(name="resolved_param_expr", default=resolved_param_expr)))
             launch_el.append(ET.Element("arg", dict(name="resolved_param", default="$(eval eval(resolved_param_expr))")))
 
@@ -859,7 +859,7 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
             launch_el.append(ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)")))
 
         # add resource loader
-        sync_resources_expr = f"__import__('monolaunch').monoresource.sync(resolved_param)"
+        sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param)"
         launch_el.append(ET.Element("arg", dict(name="sync_resources_expr", default=sync_resources_expr)))
         launch_el.append(ET.Element("arg", dict(name="sync_resources", default="$(eval eval(sync_resources_expr))")))
         

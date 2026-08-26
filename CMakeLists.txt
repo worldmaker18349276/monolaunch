@@ -13,6 +13,5 @@ catkin_install_python(PROGRAMS
   scripts/param_loader.py
   scripts/launch_converter.py
   scripts/exec.sh
-  scripts/yl
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
