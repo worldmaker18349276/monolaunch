@@ -532,7 +532,11 @@ def _tagged_list_representer(self: ExYAMLDumper, data: TaggedList):
     return self.represent_sequence(f"!{data._tag}", data, flow_style=is_vec_like(data))
 
 def _tagged_dict_representer(self: ExYAMLDumper, data: TaggedDict):
-    return self.represent_mapping(f"!{data._tag}", data, flow_style=is_vec_like(data))
+    content = [
+        (yaml.SafeDumper.represent_str(self, k), self.represent_data(v)) # type: ignore
+        for k, v in data.items()
+    ]
+    return yaml.nodes.MappingNode(f"!{data._tag}", content, flow_style=is_vec_like(data))
 
 ExYAMLDumper.add_representer(TaggedScalar, _tagged_scalar_representer)
 ExYAMLDumper.add_representer(TaggedList, _tagged_list_representer)
