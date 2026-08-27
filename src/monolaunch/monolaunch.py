@@ -20,9 +20,14 @@ remap(dict)                         - <remap> tag
 set_param(dict)                     - <param> tag
 load_param(dict)                    - <rosparam> tag, load parameters from file, support json pointer
 get_value("file.yaml#/sub/field")   - get value from given yaml file
+get_value("file.yaml#/sub/field", fallback)
+                                    - if is missing or type doesn't match fallback,
+                                      fallback value will be returned.
+get_value((json_obj, "sub/field"), fallback)
+                                    - similar as above, but directly from object
 with machine(name, address, ...)    - just like <machine> tag, set machine as default in a scope
                                       for your convenience, you can pass in url like
-                                      "//user:pswd@addr/path/to/env_loader.sh" directly
+                                      "machine://user:pswd@addr/path/to/env_loader.sh" directly
 env(name, fallback)                 - just like $(env name) or $(optenv name fallback)
 find(pkg)                           - just like $(find pkg)
 anon(name)                          - just like $(anon name)
@@ -205,9 +210,9 @@ import keyword
 import re
 import warnings
 import xml.etree.ElementTree as ET
-from typing import Any, Callable, Dict, KeysView, List, Literal, Optional, Tuple, Sequence, Union
+from typing import Any, Callable, Dict, KeysView, List, Literal, Optional, Tuple, Sequence, Union, overload
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field
 from collections import ChainMap
 import sys
 import os
@@ -217,9 +222,9 @@ import urllib.parse
 import shlex
 from uuid import uuid4
 import yaml
-from monolaunch.yaml_utils import JSON, FieldPath, Link
+from monolaunch.yaml_utils import JSON, FieldAccessError, FieldPath, Link
 from . import monoparam
-from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 
 __all__ = [
     "run",
@@ -371,13 +376,7 @@ class Ctx:
         else:
             self.param_loader.update(self.param_node, param, str(machine)) # type: ignore
 
-    def get_value(self, field_or_path: Union[str, Path, Link]) -> JSON:
-        if isinstance(field_or_path, Link):
-            link = field_or_path
-        elif isinstance(field_or_path, Path):
-            link = Link(field_or_path)
-        else:
-            link = Link.parse(field_or_path)
+    def get_value(self, link: Link) -> JSON:
         if not link.filepath.is_absolute():
             raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link}, you may want to use dirname()")
         tmp_param_node, _depends = self.param_loader.load(link)
@@ -690,8 +689,61 @@ def sanitize_identifier(name: str) -> str:
 def anon(name: str) -> str:
     return name + "_" + str(uuid4()).replace("-", "_")
 
-def get_value(field_or_path: Union[str, Path]) -> JSON:
-    return ctx().get_value(field_or_path)
+class LinkAccessTypeWarning(Warning):
+    def __init__(self, value_link: Link, value_type: type, expected_type: type):
+        self.value_link = value_link
+        self.value_type = value_type
+        self.expected_type = expected_type
+    
+    def __str__(self):
+        return (
+            f"field {self.value_link.relative_to(Path.cwd())} ({self.value_type.__name__})"
+            f" doesn't match expected type {self.expected_type.__name__}"
+        )
+
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]]) -> JSON: ...
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: None) -> None: ...
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: bool) -> bool: ...
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: int) -> int: ...
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: float) -> float: ...
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: str) -> str: ...
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: List[JSON]) -> List[JSON]: ...
+@overload
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: Dict[str, JSON]) -> Dict[str, JSON]: ...
+
+def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: JSON = MISSING) -> JSON: # type: ignore
+    if not isinstance(field_or_path, tuple):
+        if isinstance(field_or_path, Link):
+            link = field_or_path
+        elif isinstance(field_or_path, Path):
+            link = Link(field_or_path)
+        else:
+            link = Link.parse(field_or_path)
+        res = ctx().get_value(link)
+    else:
+        if isinstance(field_or_path[1], FieldPath):
+            fieldpath = field_or_path[1]
+        else:
+            fieldpath = FieldPath.parse(field_or_path[1])
+        link = Link(Path("<python object>"), fieldpath)
+
+        try:
+            res = fieldpath.walk(field_or_path[0])
+        except FieldAccessError as err:
+            warnings.warn(LinkAccessWarning(Link(Path("<python object>"), err.path)))
+            res = None
+
+    if fallback is not MISSING and not isinstance(res, type(fallback)): # type: ignore
+        warnings.warn(LinkAccessTypeWarning(link, type(res), type(fallback))) # type: ignore
+        res = fallback
+    return res
 
 def set_param(json: JSONWithPath):      ctx().set_param(json)
 def load_param(json: JSONWithOnlyLink): ctx().load_param(json)
