@@ -1,3 +1,72 @@
+"""
+a YAML utility tools for simple YAML.
+
+it is based on pyyaml but focus on simple YAML.
+
+YAML supports more flexible structure than JSON, such as:
+- shared nodes (circular referencing is also valid)
+- mapping with non-string keys
+- custom objects
+
+that are not what we want, we just want to serialize object in YAML format.
+we only needs to consider:
+- None
+- distinguishable simple scalar type: bool, int, float (including nan and inf), string
+- simple container type: list and dict with string keys
+
+and we prefer the syle:
+- None -> `null`, bool -> `false`, `true`
+- single-line string always double quoted (except keys of map)
+- multi-line string use `|` style if possible
+- float always contains `.`, including `.nan` and `.inf`
+- flow-style for simple list and dict (they have same scalar value type, and dict only contains single-letter keys)
+- block seq style always indent, so that it can be folded in editor
+
+we provide some tools for dealing with JSON object in deep.
+where we treat null as an empty slot.
+we also provide a simple resolver for !include and !merge tags:
+
+- `!include` imports another YAML file.
+
+  base.yaml:
+  ```
+  a: 1
+  b: 2
+  ```
+  
+  config.yaml:
+  ```
+  base: !include base.yaml
+  ```
+  
+  resolve to:
+  ```
+  base:
+    a: 1
+    b: 2
+  ```
+  the path of !include is relative to the current location (directory of the file contains this term)
+
+- `!merge` merges a list of mappings.
+
+  ```
+  config: !merge
+    - timeout: 10
+      retries: 3
+    - timeout: 30
+  ```
+  
+  resolve to:
+  ```
+  config:
+    timeout: 30
+    retries: 3
+  ```
+
+ExYAMLLoader also keeps unknown tags and construct them as TaggedScalar, TaggedList, TaggedDict,
+and ExYAMLDumper is able to re-export those tagged objects.
+you can use `python -m monolaunch.yaml_utils <yaml file>` directly to resolve YAML with !include and !merge.
+"""
 from inspect import cleandoc
 import math
 from typing import Any, Dict, Generator, List, Set, Tuple, Union, Optional
@@ -23,13 +92,13 @@ JSON = Union[None, JSONScalar, List["JSON"], Dict[str, "JSON"]]
 @dataclass(frozen=True)
 class TaggedScalar:
     data: JSONScalar
-    _tag: str = ""
+    tag: str = ""
 
 class TaggedDict(Dict[str, "TaggedJSON"]):
-    _tag: str = ""
+    tag: str = ""
 
 class TaggedList(List["TaggedJSON"]):
-    _tag: str = ""
+    tag: str = ""
 
 TaggedJSON = Union[None, JSONScalar, List["TaggedJSON"], Dict[str, "TaggedJSON"], TaggedScalar, TaggedList, TaggedDict]
 
@@ -59,115 +128,115 @@ def deep_copy(obj: JSON) -> JSON:
         return [deep_copy(e) for e in obj]
     return obj
 
-def deep_update(dst: JSON, src: JSON) -> JSON:
+def deep_update(base: JSON, update: JSON) -> JSON:
     """
-    update dst by copying src.
-    update dict and list, treat null as empty slot.
+    update base by copying update, returns updated base.
+    update dict and list, treating null as an empty slot.
     """
     # skip null
-    if dst is not None and src is None:
-        return dst
+    if base is not None and update is None:
+        return base
 
-    if type(dst) != type(src):
-        return deep_copy(src)
+    if type(base) != type(update):
+        return deep_copy(update)
 
-    if isinstance(dst, dict):
-        assert isinstance(src, dict)
-        for k, v in src.items():
-            dst[k] = deep_update(dst.get(k), v)
-        return dst
+    if isinstance(base, dict):
+        assert isinstance(update, dict)
+        for k, v in update.items():
+            base[k] = deep_update(base.get(k), v)
+        return base
 
-    if isinstance(dst, list):
-        assert isinstance(src, list)
+    if isinstance(base, list):
+        assert isinstance(update, list)
         # zip longest
-        if len(dst) < len(src):
-            dst.extend([None]*(len(src) - len(dst)))
-        elif len(dst) > len(src):
-            src = [*src, *[None]*(len(dst) - len(src))]
-        for i in range(len(dst)):
-            dst[i] = deep_update(dst[i], src[i])
-        return dst
+        if len(base) < len(update):
+            base.extend([None]*(len(update) - len(base)))
+        elif len(base) > len(update):
+            update = [*update, *[None]*(len(base) - len(update))]
+        for i in range(len(base)):
+            base[i] = deep_update(base[i], update[i])
+        return base
 
-    return deep_copy(src)
+    return deep_copy(update)
 
-def _deep_merge(path: "FieldPath", dst: JSON, src: JSON) -> Tuple[JSON, List["FieldPath"]]:
+def _deep_merge(path: "FieldPath", base: JSON, update: JSON) -> Tuple[JSON, List["FieldPath"]]:
     # skip null
-    if dst is not None and src is None:
-        return dst, []
+    if base is not None and update is None:
+        return base, []
 
-    if dst is None and src is not None:
-        return deep_copy(src), []
+    if base is None and update is not None:
+        return deep_copy(update), []
 
-    if type(dst) != type(src):
-        return dst, [path]
+    if type(base) != type(update):
+        return base, [path]
 
-    if isinstance(dst, dict):
-        assert isinstance(src, dict)
+    if isinstance(base, dict):
+        assert isinstance(update, dict)
         inconsistencies: List[FieldPath] = []
-        for k, v in src.items():
-            v, a = _deep_merge(path.append(k), dst.get(k), v)
-            dst[k] = v
+        for k, v in update.items():
+            v, a = _deep_merge(path.append(k), base.get(k), v)
+            base[k] = v
             inconsistencies.extend(a)
-        return dst, inconsistencies
+        return base, inconsistencies
 
-    if isinstance(dst, list):
-        assert isinstance(src, list)
+    if isinstance(base, list):
+        assert isinstance(update, list)
         inconsistencies: List[FieldPath] = []
         # zip longest
-        if len(dst) < len(src):
-            dst.extend([None]*(len(src) - len(dst)))
-        elif len(dst) > len(src):
-            src = [*src, *[None]*(len(dst) - len(src))]
-        for i in range(len(dst)):
-            v, a = _deep_merge(path.append(i), dst[i], src[i])
-            dst[i] = v
+        if len(base) < len(update):
+            base.extend([None]*(len(update) - len(base)))
+        elif len(base) > len(update):
+            update = [*update, *[None]*(len(base) - len(update))]
+        for i in range(len(base)):
+            v, a = _deep_merge(path.append(i), base[i], update[i])
+            base[i] = v
             inconsistencies.extend(a)
-        return dst, inconsistencies
+        return base, inconsistencies
 
-    if dst == src:
-        return dst, []
+    if base == update:
+        return base, []
 
-    return dst, [path]
+    return base, [path]
 
-def deep_merge(dst: JSON, src: JSON) -> Tuple[JSON, List["FieldPath"]]:
+def deep_merge(base: JSON, update: JSON) -> Tuple[JSON, List["FieldPath"]]:
     """
-    merge dst by copying src.
-    unlike update, different values at the same field will not be overrided, and warnings will be raised.
+    merge base by copying update, returns merged base and updated paths.
+    unlike deep_update, different values at the same field will not be overrided, and warnings will be raised.
     """
-    return _deep_merge(FieldPath(), dst, src)
+    return _deep_merge(FieldPath(), base, update)
 
-def deep_eq(a: JSON, b: JSON) -> bool:
+def deep_eq(lhs: JSON, rhs: JSON) -> bool:
     """
     deep compare two jsons.
     noting that nan equal to nan, True and 1 and 1.0 are different.
     """
-    stack: List[Tuple[JSON, JSON]] = [(a, b)]
+    stack: List[Tuple[JSON, JSON]] = [(lhs, rhs)]
     while stack:
-        a, b = stack.pop()
-        if type(a) != type(b):
+        lhs, rhs = stack.pop()
+        if type(lhs) != type(rhs):
             return False
 
-        if isinstance(a, dict):
-            assert isinstance(b, dict)
-            if set(a.keys()) != set(b.keys()):
+        if isinstance(lhs, dict):
+            assert isinstance(rhs, dict)
+            if set(lhs.keys()) != set(rhs.keys()):
                 return False
-            for k in a:
-                stack.append((a[k], b[k]))
+            for k in lhs:
+                stack.append((lhs[k], rhs[k]))
             continue
         
-        if isinstance(a, list):
-            assert isinstance(b, list)
-            if len(a) != len(b):
+        if isinstance(lhs, list):
+            assert isinstance(rhs, list)
+            if len(lhs) != len(rhs):
                 return False
-            for i in range(len(a)):
-                stack.append((a[i], b[i]))
+            for i in range(len(lhs)):
+                stack.append((lhs[i], rhs[i]))
             continue
 
         # special case: nan != nan
-        if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        if isinstance(lhs, float) and isinstance(rhs, float) and math.isnan(lhs) and math.isnan(rhs):
             continue
 
-        if a != b:
+        if lhs != rhs:
             return False
 
     return True
@@ -306,7 +375,7 @@ class FieldPath:
                     raise FieldAccessError(self[:i+1], f"{type(node).__name__} object")
                 node = node[key]
             else:
-                if not isinstance(node, list) or key >= len(node):
+                if not isinstance(node, list) or key not in range(len(node)):
                     raise FieldAccessError(self[:i+1], f"{type(node).__name__} object")
                 node = node[key]
         return node
@@ -401,41 +470,48 @@ class ExYAMLLoader(SimpleYAMLLoader):
         self.filepath = filepath
 
 def _include_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSON:
-    if isinstance(node, yaml.nodes.ScalarNode):
-        link = loader.construct_scalar(node)
-        link = Link.parse(link)
-
-        subfilepath = loader.filepath.parent / link.filepath
-        with open(subfilepath, 'r') as f:
-            subloader = type(loader)(f)
-            subloader.set_filepath(subfilepath)
-            try:
-                data = subloader.get_single_data()
-            finally:
-                subloader.dispose()
-        return link.fieldpath.walk(data) # type: ignore
-    else:
+    if not isinstance(node, yaml.nodes.ScalarNode):
         raise yaml.constructor.ConstructorError(
             None, None,
-            f"!include expects a scalar, got {type(node).__name__}",
+            f"!include expects a str scalar, got {type(node).__name__}",
             node.start_mark,
         )
 
+    link = loader.construct_scalar(node)
+    if not isinstance(link, str): # pyright: ignore[reportUnnecessaryIsInstance]
+        raise yaml.constructor.ConstructorError(
+            None, None,
+            f"!include expects a str scalar, got {type(node).__name__}",
+            node.start_mark,
+        )
+
+    link = Link.parse(link)
+
+    subfilepath = loader.filepath.parent / link.filepath
+    with open(subfilepath, 'r') as f:
+        subloader = type(loader)(f)
+        subloader.set_filepath(subfilepath)
+        try:
+            data = subloader.get_single_data()
+        finally:
+            subloader.dispose()
+    return link.fieldpath.walk(data) # type: ignore
+
 def _merge_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSON:
-    if isinstance(node, yaml.nodes.SequenceNode):
-        objs = loader.construct_sequence(node, deep=True)
-        if not objs:
-            return None
-        obj = objs[0]
-        for obj_ in objs[1:]:
-            obj = deep_update(obj, obj_)
-        return obj # type: ignore
-    else:
+    if not isinstance(node, yaml.nodes.SequenceNode):
         raise yaml.constructor.ConstructorError(
             None, None,
             f"!merge expects a sequence, got {type(node).__name__}",
             node.start_mark,
         )
+
+    objs = loader.construct_sequence(node, deep=True)
+    if not objs:
+        return None
+    obj = objs[0]
+    for obj_ in objs[1:]:
+        obj = deep_update(obj, obj_)
+    return obj # type: ignore
 
 def _unknown_tag_constructor(loader: ExYAMLLoader, tag_suffix: str, node: yaml.nodes.Node) -> TaggedJSON:
     if isinstance(node, yaml.ScalarNode):
@@ -443,17 +519,17 @@ def _unknown_tag_constructor(loader: ExYAMLLoader, tag_suffix: str, node: yaml.n
     elif isinstance(node, yaml.SequenceNode):
         value = loader.construct_sequence(node)
     elif isinstance(node, yaml.MappingNode):
-        value = loader.construct_mapping(node)
+        value = _dict_constructor(loader, node)
     else:
         assert False
 
     if isinstance(value, list):
         value = TaggedList(value)
-        value._tag = tag_suffix
+        value.tag = tag_suffix
         return value
     if isinstance(value, dict):
         value = TaggedDict(value)
-        value._tag = tag_suffix
+        value.tag = tag_suffix
         return value
     return TaggedScalar(value, tag_suffix)
 
@@ -503,7 +579,7 @@ class SimpleYAMLDumper(yaml.SafeDumper):
     def ignore_aliases(self, data: Any):
         return True
 
-def is_vec_like(data: JSON) -> bool:
+def is_vec_like(data: Union[JSON, TaggedJSON]) -> bool:
     DTYPES: List[Set[type]] = [{bool}, {int}, {float}, {str}]
     if isinstance(data, dict) and all(len(k) == 1 for k in data.keys()) and set(type(v) for v in data.values()) in DTYPES:
         return True
@@ -547,17 +623,17 @@ class ExYAMLDumper(SimpleYAMLDumper):
 
 def _tagged_scalar_representer(self: ExYAMLDumper, data: TaggedScalar):
     node = self.represent_data(data.data)
-    return self.represent_scalar(f"!{data._tag}", node.value)
+    return self.represent_scalar(f"!{data.tag}", node.value)
 
 def _tagged_list_representer(self: ExYAMLDumper, data: TaggedList):
-    return self.represent_sequence(f"!{data._tag}", data, flow_style=is_vec_like(data))
+    return self.represent_sequence(f"!{data.tag}", data, flow_style=is_vec_like(data))
 
 def _tagged_dict_representer(self: ExYAMLDumper, data: TaggedDict):
     content = [
         (yaml.SafeDumper.represent_str(self, k), self.represent_data(v)) # type: ignore
         for k, v in data.items()
     ]
-    return yaml.nodes.MappingNode(f"!{data._tag}", content, flow_style=is_vec_like(data))
+    return yaml.nodes.MappingNode(f"!{data.tag}", content, flow_style=is_vec_like(data))
 
 ExYAMLDumper.add_representer(TaggedScalar, _tagged_scalar_representer)
 ExYAMLDumper.add_representer(TaggedList, _tagged_list_representer)
