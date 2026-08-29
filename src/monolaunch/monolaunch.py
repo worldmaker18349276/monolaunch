@@ -20,11 +20,10 @@ remap(dict)                         - <remap> tag
 set_param(dict)                     - <param> tag
 load_param(dict)                    - <rosparam> tag, load parameters from file, support json pointer
 get_value("file.yaml#/sub/field")   - get value from given yaml file
+get_value((json_obj, "sub/field"))  - get value from object directly
 get_value("file.yaml#/sub/field", fallback)
-                                    - if is missing or type doesn't match fallback,
+                                    - if value is missing or type doesn't match fallback,
                                       fallback value will be returned.
-get_value((json_obj, "sub/field"), fallback)
-                                    - similar as above, but directly from object
 with machine(name, address, ...)    - just like <machine> tag, set machine as default in a scope
                                       for your convenience, you can pass in url like
                                       "machine://user:pswd@addr/path/to/env_loader.sh" directly
@@ -381,7 +380,7 @@ class Ctx:
             raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link}, you may want to use dirname()")
         tmp_param_node, _depends = self.param_loader.load(link)
         if tmp_param_node is None:
-            raise ValueError(f"fail to get param field {link}")
+            raise FieldAccessError(link.fieldpath, str(link.filepath))
         res, _depends = self.param_loader.resolve_all(tmp_param_node, [])
         # TODO: lock this param, since generated launch file depends on it now
         return res
@@ -726,7 +725,9 @@ def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, Field
             link = Link(field_or_path)
         else:
             link = Link.parse(field_or_path)
-        res = ctx().get_value(link)
+
+        get_value_ = lambda: ctx().get_value(link)
+
     else:
         if isinstance(field_or_path[1], FieldPath):
             fieldpath = field_or_path[1]
@@ -734,13 +735,18 @@ def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, Field
             fieldpath = FieldPath.parse(field_or_path[1])
         link = Link(Path("<python object>"), fieldpath)
 
-        try:
-            res = fieldpath.walk(field_or_path[0])
-        except FieldAccessError as err:
-            warnings.warn(LinkAccessWarning(Link(Path("<python object>"), err.path)))
-            res = None
+        get_value_ = lambda: fieldpath.walk(field_or_path[0])
 
-    if fallback is not MISSING and not isinstance(res, type(fallback)): # type: ignore
+    if fallback is MISSING: # type: ignore
+        return get_value_()
+
+    try:
+        res = get_value_()
+    except FieldAccessError as err:
+        warnings.warn(LinkAccessWarning(Link(link.filepath, err.path)))
+        res = None
+
+    if not isinstance(res, type(fallback)):
         warnings.warn(LinkAccessTypeWarning(link, type(res), type(fallback))) # type: ignore
         res = fallback
     return res

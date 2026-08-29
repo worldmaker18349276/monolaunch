@@ -238,11 +238,12 @@ def deep_iter(obj: JSON) -> Generator[Tuple["FieldPath", JSONScalar], None, None
 
 
 class FieldAccessError(Exception):
-    def __init__(self, path: "FieldPath"):
+    def __init__(self, path: "FieldPath", obj: str):
+        self.obj = obj
         self.path = path
     
     def __str__(self):
-        return f"fail to access {self.path}"
+        return f"fail to access {self.path} from {self.obj}"
 
 @dataclass(frozen=True)
 class FieldPath:
@@ -282,7 +283,7 @@ class FieldPath:
             return self.append(key_or_subpath)
     
     def append(self, key: Union[int, str]) -> "FieldPath":
-            return FieldPath(self.elements + (key,))
+        return FieldPath(self.elements + (key,))
     
     def extend(self, subpath: "FieldPath") -> "FieldPath":
         return FieldPath(self.elements + subpath.elements)
@@ -302,11 +303,11 @@ class FieldPath:
         for i, key in enumerate(self.elements):
             if isinstance(key, str):
                 if not isinstance(node, dict) or key not in node:
-                    raise FieldAccessError(self[:i+1])
+                    raise FieldAccessError(self[:i+1], f"{type(node).__name__} object")
                 node = node[key]
             else:
                 if not isinstance(node, list) or key >= len(node):
-                    raise FieldAccessError(self[:i+1])
+                    raise FieldAccessError(self[:i+1], f"{type(node).__name__} object")
                 node = node[key]
         return node
 
