@@ -959,6 +959,11 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
 def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
     if launch_func is None:
         return lambda launch_func: run(launch_func, use_param_loader=use_param_loader) # type: ignore
+
+    dry_run = False
+    if "--dry-run" in sys.argv:
+        sys.argv.remove("--dry-run")
+        dry_run = True
     
     try:
         launch_filepath = generate(launch_func=launch_func, use_param_loader=use_param_loader)
@@ -966,8 +971,7 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
         print(f"\033[31m{e}\033[m")
         exit(1)
 
-    if "--dry-run" in sys.argv:
-        sys.argv.remove("--dry-run")
+    if dry_run:
         print(shlex.join(["roslaunch", str(launch_filepath), *sys.argv[1:]]))
         return
     import os
