@@ -1,6 +1,7 @@
 from inspect import cleandoc
 import math
 from typing import Any, Dict, Generator, List, Set, Tuple, Union, Optional
+import os.path
 from pathlib import Path
 from dataclasses import dataclass, field
 import yaml
@@ -348,7 +349,7 @@ class Link:
 
     def relative_to(self, path: Path) -> "Link":
         """left divide"""
-        return Link(self.filepath.relative_to(path), self.fieldpath)
+        return Link(Path(os.path.relpath(self.filepath, path)), self.fieldpath)
     
     def __str__(self) -> str:
         if self.fieldpath or "#" in str(self.filepath):

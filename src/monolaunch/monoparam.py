@@ -418,7 +418,10 @@ class LinkAccessWarning(Warning):
         self.link = link
     
     def __str__(self):
-        return f"fail to access {self.link.relative_to(Path.cwd())}"
+        relpath = self.link.relative_to(Path.cwd())
+        # if str(relpath.filepath).startswith(".."):
+        #     relpath = self.link
+        return f"fail to access {relpath}"
 
 class SchemaMismatchTypeWarning(Warning):
     def __init__(self, value_link: Link, value_type: str, schema_link: Link, schema_type: str):
