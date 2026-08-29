@@ -104,7 +104,7 @@ def _deep_merge(path: "FieldPath", dst: JSON, src: JSON) -> Tuple[JSON, List["Fi
         assert isinstance(src, dict)
         inconsistencies: List[FieldPath] = []
         for k, v in src.items():
-            v, a = _deep_merge(path / k, dst.get(k), v)
+            v, a = _deep_merge(path.append(k), dst.get(k), v)
             dst[k] = v
             inconsistencies.extend(a)
         return dst, inconsistencies
@@ -118,7 +118,7 @@ def _deep_merge(path: "FieldPath", dst: JSON, src: JSON) -> Tuple[JSON, List["Fi
         elif len(dst) > len(src):
             src = [*src, *[None]*(len(dst) - len(src))]
         for i in range(len(dst)):
-            v, a = _deep_merge(path / i, dst[i], src[i])
+            v, a = _deep_merge(path.append(i), dst[i], src[i])
             dst[i] = v
             inconsistencies.extend(a)
         return dst, inconsistencies
@@ -190,23 +190,23 @@ def deep_diff(old: JSON, new: JSON) -> Dict["FieldPath", Optional[JSON]]:
             assert isinstance(b, dict)
             for k in a.keys():
                 if k not in b:
-                    updated[path / k] = None
+                    updated[path.append(k)] = None
             for k in b.keys():
                 if k not in a:
-                    updated[path / k] = b[k]
+                    updated[path.append(k)] = b[k]
                 else:
-                    stack.append((path / k, a[k], b[k]))
+                    stack.append((path.append(k), a[k], b[k]))
             continue
 
         if isinstance(a, list):
             assert isinstance(b, list)
             for i in range(len(b)):
                 if i < len(a):
-                    stack.append((path / i, a[i], b[i]))
+                    stack.append((path.append(i), a[i], b[i]))
                 else:
-                    updated[path / i] = b[i]
+                    updated[path.append(i)] = b[i]
             for i in range(len(b), len(a)):
-                updated[path / i] = None
+                updated[path.append(i)] = None
             continue
 
         # scalar
@@ -225,10 +225,10 @@ def deep_iter(obj: JSON) -> Generator[Tuple["FieldPath", JSONScalar], None, None
         path, value = stack.pop()
         if isinstance(value, dict):
             for key in list(value.keys()):
-                stack.append((path / key, value[key]))
+                stack.append((path.append(key), value[key]))
         elif isinstance(value, list):
             for key in range(len(value)):
-                stack.append((path / key, value[key]))
+                stack.append((path.append(key), value[key]))
         elif value is None:
             # skip None
             pass
@@ -251,6 +251,11 @@ class FieldPath:
     """
     elements: Tuple[Union[int, str], ...] = field(default_factory=tuple)
 
+    def __post_init__(self):
+        for key in self.elements:
+            if isinstance(key, str) and "/" in key:
+                raise ValueError(f"element of FieldPath cannot contain '/': {key}")
+
     @staticmethod
     def parse(fieldpath: str) -> "FieldPath":
         path: List[Union[int, str]] = []
@@ -267,11 +272,19 @@ class FieldPath:
     def __repr__(self) -> str:
         return f"FieldPath.parse({str(self)!r})"
 
-    def __truediv__(self, key: "Union[int, str, FieldPath]") -> "FieldPath":
-        if isinstance(key, FieldPath):
-            return FieldPath(self.elements + key.elements)
+    def __truediv__(self, key_or_subpath: Union[int, str, "FieldPath"]) -> "FieldPath":
+        if isinstance(key_or_subpath, FieldPath):
+            return self.extend(key_or_subpath)
+        elif isinstance(key_or_subpath, str):
+            return self.extend(FieldPath.parse(key_or_subpath))
         else:
+            return self.append(key_or_subpath)
+    
+    def append(self, key: Union[int, str]) -> "FieldPath":
             return FieldPath(self.elements + (key,))
+    
+    def extend(self, subpath: "FieldPath") -> "FieldPath":
+        return FieldPath(self.elements + subpath.elements)
     
     def __bool__(self) -> bool:
         return bool(self.elements)
@@ -326,6 +339,12 @@ class Link:
     def __truediv__(self, key: Union[int, str, FieldPath]) -> "Link":
         """right concat"""
         return Link(self.filepath, self.fieldpath / key)
+
+    def append(self, key: Union[int, str]) -> "Link":
+        return Link(self.filepath, self.fieldpath.append(key))
+
+    def extend(self, subfieldpath: FieldPath) -> "Link":
+        return Link(self.filepath, self.fieldpath.extend(subfieldpath))
 
     def relative_to(self, path: Path) -> "Link":
         """left divide"""

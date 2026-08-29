@@ -169,10 +169,10 @@ def sync(params_link: str):
     params = assert_mapping(assert_JSON(params_))
     sync_resources = params.get("$sync_resources", [])
     if not isinstance(sync_resources, list):
-        curr_link = params_link_ / "$sync_resources"
+        curr_link = params_link_.append("$sync_resources")
         raise TypeError(f"{curr_link} is not seq")
     for i, resource in enumerate(sync_resources):
-        curr_link = params_link_ / "$sync_resources" / i
+        curr_link = params_link_.append("$sync_resources").append(i)
         if not isinstance(resource, dict):
             raise TypeError(f"{curr_link} is not map")
         

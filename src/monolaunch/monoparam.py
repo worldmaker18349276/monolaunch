@@ -25,11 +25,11 @@ def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple["FieldPath", JSONSc
     while stack:
         path, value = stack.pop()
         if isinstance(value, dict):
-            for key in list(value.keys()):
-                stack.append((path / key, value[key]))
+            for subpath in list(value.keys()):
+                stack.append((path.extend(FieldPath.parse(subpath)), value[subpath]))
         elif isinstance(value, list):
             for key in range(len(value)):
-                stack.append((path / key, value[key]))
+                stack.append((path.append(key), value[key]))
         elif value is None:
             # skip None
             pass
@@ -140,23 +140,23 @@ def SourcedJSON_deep_diff(old: SourcedJSON, new: SourcedJSON) -> Dict["FieldPath
             assert isinstance(b, dict)
             for k in a.keys():
                 if k not in b:
-                    updated[path / k] = None
+                    updated[path.append(k)] = None
             for k in b.keys():
                 if k not in a:
-                    updated[path / k] = b[k]
+                    updated[path.append(k)] = b[k]
                 else:
-                    stack.append((path / k, a[k], b[k]))
+                    stack.append((path.append(k), a[k], b[k]))
             continue
 
         if isinstance(a, list):
             assert isinstance(b, list)
             for i in range(len(b)):
                 if i < len(a):
-                    stack.append((path / i, a[i], b[i]))
+                    stack.append((path.append(i), a[i], b[i]))
                 else:
-                    updated[path / i] = b[i]
+                    updated[path.append(i)] = b[i]
             for i in range(len(b), len(a)):
-                updated[path / i] = None
+                updated[path.append(i)] = None
             continue
 
         if isinstance(a, Merge):
@@ -179,13 +179,13 @@ def SourcedJSON_deep_iter(obj: SourcedJSON) -> Generator[Tuple["FieldPath", "Fie
         raw_path, path, value = stack.pop()
         if isinstance(value, dict):
             for key in list(value.keys()):
-                stack.append((raw_path / key, path / key, value[key]))
+                stack.append((raw_path.append(key), path.append(key), value[key]))
         elif isinstance(value, list):
             for key in range(len(value)):
-                stack.append((raw_path / key, path / key, value[key]))
+                stack.append((raw_path.append(key), path.append(key), value[key]))
         elif isinstance(value, Merge):
             for key in range(len(value.items)):
-                stack.append((raw_path / key, path, value.items[key]))
+                stack.append((raw_path.append(key), path, value.items[key]))
         elif value is None:
             # skip None
             pass
@@ -717,7 +717,7 @@ class SchemaSource:
 
     def get_inner(self) -> Optional["SchemaSource"]:
         if isinstance(self.node, dict) and isinstance(anyOf := self.node.get("anyOf", []), list) and len(anyOf) == 1:
-            return SchemaSource(self.link / "anyOf" / 0, anyOf[0])
+            return SchemaSource(self.link.append("anyOf").append(0), anyOf[0])
         return None
 
     def get_ref(self) -> Optional[Link]:
@@ -748,7 +748,7 @@ class SchemaSource:
                 and isinstance(properties := self.node.get("properties", None), dict)
             ):
                 return "struct", {
-                    key: SchemaSource(self.link / "properties" / key, node)
+                    key: SchemaSource(self.link.append("properties").append(key), node)
                     for key, node in properties.items()
                 }
 
@@ -756,10 +756,10 @@ class SchemaSource:
                 node_type == "object"
                 and isinstance(additionalProperties := self.node.get("additionalProperties", None), dict)
             ):
-                return "dict", SchemaSource(self.link / "additionalProperties", additionalProperties)
+                return "dict", SchemaSource(self.link.append("additionalProperties"), additionalProperties)
 
             if node_type == "array" and "items" in self.node:
-                return "array", SchemaSource(self.link / "items", self.node["items"])
+                return "array", SchemaSource(self.link.append("items"), self.node["items"])
 
             if node_type == "null":
                 return "null", type(None)
@@ -1027,12 +1027,12 @@ class SourceLoader:
             if node is None:
                 raw_schema = None
             elif not is_JSON(node):
-                warnings.warn(LoadSchemaWarning(Link(filepath) / "$schema"))
+                warnings.warn(LoadSchemaWarning(Link(filepath).append("$schema")))
                 raw_schema = None
             elif isinstance(node, str):
-                raw_schema = SchemaSource(Link(filepath) / "$schema", {"$ref": node})
+                raw_schema = SchemaSource(Link(filepath).append("$schema"), {"$ref": node})
             else:
-                raw_schema = SchemaSource(Link(filepath) / "$schema", assert_JSON(node))
+                raw_schema = SchemaSource(Link(filepath).append("$schema"), assert_JSON(node))
         else:
             raw_schema = None
 
@@ -1143,16 +1143,16 @@ class SourceLoader:
                 depends.add(filepath_include)
                 source_include, schema_include = self._load_source(filepath_include, source.context + data.context)
                 if source_include is not None:
-                    inputs.append((source_include, data.link.fieldpath / fieldpath))
+                    inputs.append((source_include, data.link.fieldpath.extend(fieldpath)))
                 if schema_include is not None:
-                    schema_nodes.append(_SchemaNode(schema_include, data.link.fieldpath / fieldpath))
+                    schema_nodes.append(_SchemaNode(schema_include, data.link.fieldpath.extend(fieldpath)))
                 continue
 
             if isinstance(data, Merge):
                 if len(data.items) == 0:
                     warnings.warn(EmptyMergeWarning(source.link))
                 for i in range(len(data.items)):
-                    source_i = Source(source.link / i, data.items, i, source.context)
+                    source_i = Source(source.link.append(i), data.items, i, source.context)
                     inputs.append((source_i, fieldpath))
                 continue
 
@@ -1168,7 +1168,7 @@ class SourceLoader:
                 if not isinstance(data, list) or key >= len(data):
                     continue
 
-            source_key = Source(source.link / key, data, key, source.context)
+            source_key = Source(source.link.append(key), data, key, source.context)
             inputs.append((source_key, fieldpath[1:]))
 
         return list(reversed(outputs)), list(reversed(schema_nodes)), depends
@@ -1232,7 +1232,7 @@ class SourceLoader:
                     schema_list.append(schema)
                 depends.update(depends_)
 
-        return SourcedNode(node.link / fieldpath, sources, schema_list), depends
+        return SourcedNode(node.link.extend(fieldpath), sources, schema_list), depends
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def get(self, node: SourcedNode, fieldpath: Union[int, str, FieldPath]) -> Optional[SourcedNode]:
@@ -1312,14 +1312,14 @@ class SourceLoader:
                 if isinstance(key, int):
                     if type_ == "null": break
                     if type_ != "seq":
-                        return LinkAccessWarning(Link(node.link.filepath, node.link.fieldpath / key))
+                        return LinkAccessWarning(Link(node.link.filepath, node.link.fieldpath.append(key)))
                     node_ = self.get(node, key)
                     if node_ is None: break
                     node = node_
                 else:
                     if type_ == "null": break
                     if type_ != "map":
-                        return LinkAccessWarning(Link(node.link.filepath, node.link.fieldpath / key))
+                        return LinkAccessWarning(Link(node.link.filepath, node.link.fieldpath.append(key)))
                     node_ = self.get(node, key)
                     if node_ is None: break
                     node = node_
@@ -1361,7 +1361,7 @@ class SourceLoader:
                     data[key] = None
 
             source = node.sources[-1]
-            source = Source(source.link / key, source.data, key, source.context)
+            source = Source(source.link.append(key), source.data, key, source.context)
             if isinstance(source.data, Include):
                 source.data = Merge([source.data, None])
             elif isinstance(source.data, Merge):
@@ -1376,7 +1376,7 @@ class SourceLoader:
                     if ensure_null and is_last_key and not isinstance(source.data.items[index], Merge):
                         source.data = Merge([*source.data.items, None])
                         break
-                    source = Source(source.link / index, source.data.items, index, source.context)
+                    source = Source(source.link.append(index), source.data.items, index, source.context)
             else:
                 if ensure_null and is_last_key and source.data is not None:
                     source.data = Merge([source.data, None])
@@ -1623,7 +1623,7 @@ def rosparam_diff(old: JSON, new: JSON) -> Dict["FieldPath", Optional[JSON]]:
             for k in keys:
                 av = a.get(k, {})
                 bv = b.get(k, {})
-                walk(path / k, av, bv)
+                walk(path.append(k), av, bv)
 
     walk(FieldPath(), old, new)
     return updated
