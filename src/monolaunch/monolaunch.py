@@ -207,6 +207,7 @@ import contextlib
 import inspect
 import keyword
 import re
+import traceback
 import warnings
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, KeysView, List, Literal, Optional, Tuple, Sequence, Union, overload
@@ -967,8 +968,8 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
     
     try:
         launch_filepath = generate(launch_func=launch_func, use_param_loader=use_param_loader)
-    except Exception as e:
-        print(f"\033[31m{e}\033[m")
+    except Exception:
+        traceback.print_exc()
         exit(1)
 
     if dry_run:
