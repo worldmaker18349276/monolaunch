@@ -63,6 +63,13 @@ we also provide a simple resolver for !include and !merge tags:
     retries: 3
   ```
 
+  rules:
+  - null <> any = any <> null = any   --  null behave like empty slot
+  - scalar <> scalar = later one
+  - seq <> seq = zip longest with <>
+  - map <> map = union zip with <>
+  - non-null type <> another non-null type = later one
+
 ExYAMLLoader also keeps unknown tags and construct them as TaggedScalar, TaggedList, TaggedDict,
 and ExYAMLDumper is able to re-export those tagged objects.
 you can use `python -m monolaunch.yaml_utils <yaml file>` directly to resolve YAML with !include and !merge.
