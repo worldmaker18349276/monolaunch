@@ -846,6 +846,21 @@ def as_bool(s: Union[str, bool]) -> bool:
         raise ValueError(f"{s} is not valid bool literal")
 
 
+class ForeignSyncResourceWarning(Warning):
+    def __init__(self, resource_name: str, runtime_machine_name: str, host_node_name: str, host_machine_name: str):
+        self.resource_name = resource_name
+        self.runtime_machine_name = runtime_machine_name
+        self.host_node_name = host_node_name
+        self.host_machine_name = host_machine_name
+
+    def __str__(self):
+        return (
+            f"resource {self.resource_name} "
+            f"sync to machine {self.runtime_machine_name} "
+            f"but it is a param under {self.host_node_name}"
+            + (f" ({self.host_machine_name})" if self.host_machine_name else "")
+        )
+
 def check_foreign_sync_resources(ctx: Ctx):
     if ctx.param_node is None: return
     for source in ctx.param_node.sources:
@@ -854,23 +869,19 @@ def check_foreign_sync_resources(ctx: Ctx):
             if isinstance(value, (monoparam.Include, monoparam.Resource)):
                 runtime_machine = dict(value.context).get("runtime_machine")
                 runtime_machine_key = Machine.parse(runtime_machine).key() if runtime_machine is not None else None
-                host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and FieldPath(node.ns).is_prefix(path)), None)
+                host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and FieldPath((*node.ns, node.name)).is_prefix(path)), None)
                 host_machine_key = host_node.machine.key() if host_node is not None and host_node.machine is not None else None
                 if host_machine_key != runtime_machine_key:
                     resource_name = f"!include {value.link}" if isinstance(value, monoparam.Include) else value.uri
                     runtime_machine_name = runtime_machine or ""
                     if host_node is None:
                         host_node_name = "public namespace"
+                        host_machine_name = ""
                     else:
                         assert isinstance(host_node, Node)
                         host_machine_name = str(host_node.machine or "local machine")
-                        host_node_name = f"node {host_node.name} ({host_machine_name})"
-                    msg = (
-                        f"resource {resource_name} "
-                        f"sync to machine {runtime_machine_name} "
-                        f"but it is a param under {host_node_name}"
-                    )
-                    warnings.warn(UserWarning(msg))
+                        host_node_name = f"node {_join_ns((*host_node.ns, host_node.name))}"
+                    warnings.warn(ForeignSyncResourceWarning(resource_name, runtime_machine_name, host_node_name, host_machine_name))
 
 def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
     with _with_ctx():
