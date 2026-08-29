@@ -1,3 +1,38 @@
+"""
+monoparam.py - ROS1 Python API for resolving YAML files for rosparam.
+
+it allows us to manage parameters in a cascading YAML file tree, including resources.
+
+it supports YAML files with !include, !merge, !resource tags.
+!resource is a set of URI schema which can be resolved to a file path:
+- file://{path_to_resource}                ->  $(pwd)/{path_to_resource}
+- package://{pkg_name}/{path_to_resource}  ->  $(rospack find pkg_name)/{path_to_resource}
+- ros_home://{path_to_resource}            ->  $ROS_HOME/{path_to_resource}
+
+same as !include, file resource path is relative to the current location (directory of the file contains this term).
+it will warn on invalid include, bad merge, etc, and supports certain form of $schema.
+
+it is designed for monolaunch, which utilizes this module to provide some tools to reorganize parameters.
+for users, you can write a single YAML file with !include, !merge, !resource tags,
+and use load_param/set_param to re-distribute part of them to each node as private parameters.
+then monolaunch will construct single reorganized YAML file for this launch.
+
+all local resource items will be aggregated,
+so that monoresource can sync local resources to designated machines.
+where !resource must be loaded under a `with machine(...)` scope,
+otherwise it cannot know where to put those resources.
+(this is achieved by query suffix of !include and !resource,
+like "?context=value", attached by load_param/set_param.)
+they will be put under ros home of each machine,
+and this item will be rewritten as ros_home scheme url,
+allowing remote machine to access synchronized resources.
+
+before launch, reorganized YAML file will be resolved and loaded via rosparam,
+and a synchronizer node will be launched,
+which will synchronize resolved YAML file and source YAML files in real time,
+changing one YAML file on each side will cause the other YAML file to be updated.
+"""
+
 from enum import Enum
 from inspect import cleandoc
 from typing import Any, Dict, Generator, List, Literal, Tuple, Set, Union, Optional, Type, TypeVar, Callable, IO, overload
@@ -11,16 +46,23 @@ import warnings
 from monolaunch.yaml_utils import *
 
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+def raises(*exceptions: Type[BaseException]):
+    def decorator(func: _F) -> _F:
+        func.__raises__ = exceptions  # type: ignore[attr-defined]
+        return func
+    return decorator
+
+# JSON + Path
 JSONWithPath = Union[None, JSON, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
+# JSON but only Path/Link as scalar
 JSONWithOnlyLink = Union[None, str, Path, "Link", List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
 
-def as_JSONWithPath(obj: JSON) -> JSONWithPath: return obj # type: ignore
-
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple["FieldPath", Union[JSONScalar, Path]], None, None]: ... # type: ignore
+def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple["FieldPath", Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple["FieldPath", Union[str, Path, "Link"]], None, None]: ... # type: ignore
-def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple["FieldPath", JSONScalar], None, None]: # type: ignore
+def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple["FieldPath", Union[str, Path, "Link"]], None, None]: ...
+def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple["FieldPath", JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
     stack = [(FieldPath(), folded_dict)]
     while stack:
         path, value = stack.pop()
@@ -204,8 +246,14 @@ class InvalidUriError(Exception):
     def __str__(self) -> str:
         return f"unknown URI: {self.uri}"
 
-# @raises(RosPackageNotFoundError, InvalidUriError)
+@raises(RosPackageNotFoundError, InvalidUriError)
 def retrieve_resource(uri: str) -> Path:
+    """
+    retrieve actual path of resource URI:
+    - file://{path_to_resource}                ->  $(pwd)/{path_to_resource}
+    - package://{pkg_name}/{path_to_resource}  ->  $(rospack find pkg_name)/{path_to_resource}
+    - ros_home://{path_to_resource}            ->  $ROS_HOME/{path_to_resource}
+    """
     if uri.startswith("file://"):
         path = uri[len("file://"):]
         return (Path.cwd() / Path(path)).resolve()
@@ -373,7 +421,7 @@ class SourcedYAMLDumper(SimpleYAMLDumper):
     pass
 
 def _resource_representer(self: SourcedYAMLDumper, data: Resource):
-    # doesn't work, always quoted
+    #                                                    ________ doesn't work, always quoted
     return self.represent_scalar("!resource", str(data), style="") # type: ignore
 
 def _include_representer(self: SourcedYAMLDumper, data: Include):
@@ -555,26 +603,29 @@ class UnsupportedDeletionSynchronizationWarning(Warning):
     def __str__(self):
         return f"try to delete field {self.fieldpath} and sync to original file, it is unsupported"
 
-_F = TypeVar("_F", bound=Callable[..., Any])
-def raises(*exceptions: Type[BaseException]):
-    def decorator(func: _F) -> _F:
-        func.__raises__ = exceptions  # type: ignore[attr-defined]
-        return func
-    return decorator
-
 
 @dataclass(frozen=True)
-class SyncResource:
+class SyncInfo:
     source: Path      # /path/to/source
     destination: Path # ${ROS_HOME}/resources/sync/path/to/source
     machine: str      # machine://usr:pswd@host/path/to/env_loader.sh (empty -> local)
 
 class SyncResourceManager:
+    """
+    manage how to deal with resource URI for synchronization.
+    
+    !resource URI given by user refers to actual resource locations,
+    which can be used directly on runtime except for local resource `file://...`.
+    local resource should be synchronized,
+    and URI should be rewritten into target location before loading into parameter server,
+    so that programs can access synchronized resources via resource URIs.
+    """
     @raises(ManualSyncResourceWarning, SyncResourceUnknownRuntimeError, SyncResourceSourceNotAbsoluteError)
-    def rewrite_for_sync(self, resource: Resource, sync_resources: List[SyncResource]) -> str:
+    def rewrite_for_sync(self, resource: Resource, sync_resources: List[SyncInfo]) -> str:
         """
-        map local file (file://) to runtime resource dir (ros_home://) on given machine,
-        and collect all sync resources for syncing resource later.
+        rewrite Resource to str, so that it can be loaded by rosparam properly.
+        it maps local file (file://) to runtime resource dir (ros_home://),
+        and all resources need to be synchronized will be collected.
         """
         if self.get_sync_target(resource.uri) is not None:
             warnings.warn(ManualSyncResourceWarning(resource))
@@ -593,10 +644,10 @@ class SyncResourceManager:
         ros_home_uri = self.set_sync_source(src_path)
         dst_path = self.get_sync_target(ros_home_uri)
         assert dst_path is not None
-        sync_resources.append(SyncResource(src_path, dst_path, machine))
+        sync_resources.append(SyncInfo(src_path, dst_path, machine))
         return ros_home_uri
 
-    def aggregate_sync_resources(self, sync_resources: List[SyncResource]) -> Dict[str, JSON]:
+    def aggregate_sync_resources(self, sync_resources: List[SyncInfo]) -> Dict[str, JSON]:
         res: JSON = {}
         if sync_resources:
             res["$sync_resources"] = [
@@ -610,15 +661,26 @@ class SyncResourceManager:
         return res
 
     def get_sync_target(self, uri: str) -> Optional[Path]:
+        """
+        get target path (with envvar) of a synchronized resource URI,
+        it can be expanded to actual target path on designated machine.
+        return None if it is not a synchronized resource.
+        """
         if uri.startswith("ros_home://resources/sync"):
             return Path(r"${ROS_HOME}/" + uri[len("ros_home://"):].replace("$", r"${DOLLARSIGN}"))
         return None
 
     def set_sync_source(self, local_path: Path) -> str:
+        """
+        construct synchronized resource URI for given local path.
+        """
         assert local_path.is_absolute()
         return "ros_home://resources/sync/" + str(local_path.relative_to("/"))
 
     def get_machine(self, resource: Resource) -> str:
+        """
+        get designated machine of a synchronized resource URI.
+        """
         return dict(resource.context).get("runtime_machine", "")
 
     @overload
@@ -626,6 +688,9 @@ class SyncResourceManager:
     @overload
     def attach_machine(self, resource: Include, machine: str) -> Include: ...
     def attach_machine(self, resource: Union[Resource, Include], machine: str) -> Union[Resource, Include]:
+        """
+        attach machine to a synchronized resource URI or Include.
+        """
         if isinstance(resource, Resource):
             if not resource.uri.startswith("file://"):
                 return resource
@@ -802,6 +867,19 @@ class _SchemaNode:
 
 @dataclass
 class Source:
+    """
+    source of YAML file with !include, !merge, !resource tags.
+    
+    it keeps tagged structures (as Include, Merge, Resource objects) so that can be edited easily.
+    
+    itself is a reference, the actual node is accessing via data property,
+    and can be assigned instead of replaced.
+    
+    it also track accumulated context from the root.
+    
+    link is the file path of this source + the field path to current node as an unresolved JSON object,
+    that is, field path may contain index of list to be merged.
+    """
     link: Link
     parent: Union[SourcedJSON, Dict[Path, Union[SourcedJSON, ABSENCE]]]
     key: Union[int, str, Path] # assert parent[key] is valid
@@ -843,6 +921,15 @@ class Source:
 
 @dataclass
 class SourcedNode:
+    """
+    a node of YAML file with !include, !merge, !resource tags.
+    
+    it is composed of multiple Source and SchemaSource because !merge.
+    
+    link is the file path + field path of current node as resolved JSON object.
+    the file path refers to the root YAML file, not included YAML files;
+    the field path may walk into included YAML file.
+    """
     link: Link
     sources: List[Source] # assert len(self.sources) > 0
     # assert not isinstance(source.data, (Include, Merge))
@@ -1004,6 +1091,15 @@ class FileAlreadyLoadedError(Exception):
 
 @dataclass
 class SourceLoader:
+    """
+    a loader for YAML file with !include, !merge, !resource tags.
+    
+    it provides methods to load/access/update sourced nodes.
+    it caches included YAML files and schema files.
+    
+    the loader will warn on invalid include, bad merge, mismatched to schema, etc,
+    and supports certain form of $schema.
+    """
     all_includes: Dict[Path, Union[SourcedJSON, ABSENCE]] = field(default_factory=lambda: {})
     all_schema: Dict[Path, Union[SchemaJSON, ABSENCE]] = field(default_factory=lambda: {})
     sync_resource_manager: SyncResourceManager = field(default_factory=SyncResourceManager)
@@ -1246,11 +1342,11 @@ class SourceLoader:
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
             EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, IncompatibleMergeWarning)
-    def resolve_all(self, node: SourcedNode, sync_resources: Optional[List[SyncResource]] = None) -> Tuple[JSON, Set[Path]]:
+    def resolve_all(self, node: SourcedNode, sync_resources: Optional[List[SyncInfo]] = None) -> Tuple[JSON, Set[Path]]:
         """
         resolve full content of given node. returns resolved json object and its dependencies.
         the subnodes failed to resolve will be assigned to null.
-        resource URI will be rewritten and collected into sync_resources unless sync_resources is None.
+        if sync_resources is not None, resource URI will be rewritten and collected into sync_resources.
         """
         node.check()
         depends: Set[Path] = set()
@@ -1284,18 +1380,6 @@ class SourceLoader:
                 else:
                     value = value.uri
             return value, depends
-
-    @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
-            EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning, IncompatibleMergeWarning)
-    def load_resolved(self, src: Link, sync_resources: Optional[List[SyncResource]]) -> Tuple[JSON, Set[Path]]:
-        """
-        load and resolve all.
-        """
-        node, depends = self.load(src)
-        if node is None: return node, depends
-        value, depends_ = self.resolve_all(node, sync_resources)
-        depends.update(depends_)
-        return value, depends
 
     def _can_be_ensured_along(self, node: SourcedNode, fieldpath: FieldPath) -> Optional[LinkAccessWarning]:
         """
@@ -1449,7 +1533,8 @@ class SourceLoader:
 
 def resolve_YAML(link: Link) -> JSON:
     """
-    load and resolve yaml file, return resolved json.
+    load and resolve yaml file, return resolved json
+    (paths of local resources will not be rewritten).
     """
     loader = SourceLoader()
     link = Link(link.filepath.resolve(), link.fieldpath)
@@ -1472,7 +1557,7 @@ class YAMLWatcher:
     """
     watch mutation of dependent files of specific node, manage sourced node and resolved json.
 
-    loader will cache loaded files, but will not reload to latest verison automatically.
+    this is needed because loader will cache loaded files, but will not reload to latest verison automatically.
     """
     loader: SourceLoader
     mtimes: Dict[Path, int]
@@ -1497,9 +1582,10 @@ class YAMLWatcher:
             EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning,
             RootIsNotMapWarning)
-    def load(self, aggregate_sync_resources: bool):
+    def load(self, skip_empty: bool, aggregate_sync_resources: bool):
         """
         reload yaml file and resolved it.
+        if skip_empty is true, null and empty mapping will be skipped.
         if aggregate_sync_resources is true, additional fields about all sync resources will be inserted.
         this is for monoresource.
         """
@@ -1519,10 +1605,10 @@ class YAMLWatcher:
         node, depends_ = self.loader.load(Link(self.path))
         depends.update(depends_)
 
-        sync_resources: List[SyncResource] = []
-        data_ = None
+        sync_resources: List[SyncInfo] = []
+        data = None
         if node is not None:
-            data_, depends_ = self.loader.resolve_all(node, sync_resources)
+            data, depends_ = self.loader.resolve_all(node, sync_resources)
             depends.update(depends_)
 
         self.mtimes = {
@@ -1531,7 +1617,8 @@ class YAMLWatcher:
         }
         
         if node is None: return
-        data = deep_copy_skip_empty(data_)
+        if skip_empty:
+            data = deep_copy_skip_empty(data)
         if aggregate_sync_resources:
             if data is None:
                 data = self.loader.sync_resource_manager.aggregate_sync_resources(sync_resources)
@@ -1647,6 +1734,7 @@ class YAMLSynchronizer:
     resolved: YAMLWatcher
     _resolved_listeners: List[_ResolvedListener]
     _back_resolved_listeners: List[_BackResolvedListener]
+    skip_empty: bool = True
     aggregate_sync_resources: bool = True
     
     def __init__(self, original_path: Path, resolved_path: Path):
@@ -1656,7 +1744,7 @@ class YAMLSynchronizer:
         self._back_resolved_listeners = []
 
     def init(self):
-        self.resolved.load(self.aggregate_sync_resources)
+        self.resolved.load(self.skip_empty, self.aggregate_sync_resources)
 
     def get_status(self):
         status = ""
@@ -1681,7 +1769,7 @@ class YAMLSynchronizer:
             warnings.warn(SyncFileNotReadyWarning("resolved"))
             return {}
 
-        self.original.load(self.aggregate_sync_resources)
+        self.original.load(self.skip_empty, self.aggregate_sync_resources)
         if self.original.node is None:
             warnings.warn(SyncFileNotReadyWarning("original"))
             return {}
@@ -1708,7 +1796,7 @@ class YAMLSynchronizer:
             warnings.warn(SyncFileNotReadyWarning("resolved"))
             return {}
 
-        self.resolved.load(False)
+        self.resolved.load(False, False)
         if self.resolved.node is None: # type: ignore
             warnings.warn(SyncFileNotReadyWarning("resolved"))
             return {}
@@ -1734,7 +1822,7 @@ class YAMLSynchronizer:
                     # TODO: try to delete standalone (not-merged) field
                     warnings.warn(UnsupportedDeletionSynchronizationWarning(key))
                 else:
-                    update[str(key)] = as_JSONWithPath(value)
+                    update[str(key)] = value
             assert self.original.node is not None
             self.original.loader.update(self.original.node, update)
 
@@ -1792,9 +1880,11 @@ class YAMLSynchronizer:
             status = status_
             time.sleep(dt)
 
-def save_resolved(source_path: Union[str, Path], aggregate_sync_resources: bool = True) -> str:
+def save_resolved(source_path: Union[str, Path], skip_empty: bool = True, aggregate_sync_resources: bool = True) -> str:
     """
-    resolve yaml file, save as {name}.resolved.yaml.
+    resolve yaml file, save as {name}.resolved.yaml, returns resolved yaml file path.
+
+    if skip_empty is true, null and empty mapping will be skipped.
     if aggregate_sync_resources is true, it will append field "$sync_resources" at the root.
     """
     
@@ -1805,6 +1895,7 @@ def save_resolved(source_path: Union[str, Path], aggregate_sync_resources: bool 
     resolved_path.touch()
     print(f"resolve {source_path} -> {resolved_path}")
     sync = YAMLSynchronizer(source_path, resolved_path)
+    sync.skip_empty = skip_empty
     sync.aggregate_sync_resources = aggregate_sync_resources
     sync.init()
     sync.resolve()
