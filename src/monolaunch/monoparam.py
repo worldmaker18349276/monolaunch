@@ -11,7 +11,7 @@ import warnings
 from monolaunch.yaml_utils import *
 
 
-JSONWithPath = Union[None, JSONScalar, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
+JSONWithPath = Union[None, JSON, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
 JSONWithOnlyLink = Union[None, str, Path, "Link", List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
 
 def as_JSONWithPath(obj: JSON) -> JSONWithPath: return obj # type: ignore
