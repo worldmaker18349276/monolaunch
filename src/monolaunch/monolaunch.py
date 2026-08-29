@@ -545,6 +545,10 @@ class Node:
 
     def to_xml(self) -> ET.Element:
         attrs: Dict[str, str] = {}
+
+        if self.ns:
+            attrs["ns"] = _join_ns(self.ns)
+
         attrs["name"] = self.name
         attrs["pkg"] = self.pkg
         attrs["type"] = self.type
@@ -558,9 +562,6 @@ class Node:
         if self.clear_params:  attrs["clear_params"] = "true"
         if self.required:      attrs["required"] = "true"
         if self.launch_prefix: attrs["launch-prefix"] = shlex.join(str(a) for a in self.launch_prefix)
-
-        if self.ns:
-            attrs["ns"] = _join_ns(self.ns)
 
         el = ET.Element("node", attrs)
         for k, v in self.env.items():
