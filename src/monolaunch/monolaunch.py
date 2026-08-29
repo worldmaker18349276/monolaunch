@@ -32,6 +32,7 @@ find(pkg)                           - just like $(find pkg)
 anon(name)                          - just like $(anon name)
 dirname()                           - just like $(dirname)
 ns()                                - get current namespace, or use ns("~") for private namespace
+@launch_prefix                      - make launch_prefix function, see `launch_prefix`
 
 Machine
 -------
@@ -226,6 +227,7 @@ them resolve it before launch.
 """
 
 import contextlib
+import functools
 import inspect
 import keyword
 import re
@@ -254,7 +256,7 @@ __all__ = [
     "set_param", "load_param", "get_value",
     "remap", "set_env",
     "machine",
-    "env", "find", "anon", "ns", "dirname",
+    "env", "find", "anon", "ns", "dirname", "launch_prefix",
     "as_bool",
 ]
 
@@ -813,10 +815,57 @@ def ns(n: Literal["", "~"] = "") -> str:
 def dirname() -> Path:
     return Path(inspect.currentframe().f_back.f_globals["__file__"]).parent.resolve() # type: ignore
 
-def init(script: Union[str, Path]):
-    # TODO: assign an init script which will run after preparing resource, before launch
-    #       ex. move resource file to proper place
-    ...
+class UncopyableFunctionWarning(Warning):
+    def __init__(self, func_name: str):
+        self.func_name = func_name
+    
+    def __str__(self):
+        return f"function {self.func_name} is not a source-copyable function"
+
+def launch_prefix(prefix_func: Callable[[*Tuple[str, ...]], None]):
+    """
+    a launch-prefix function decorator.
+    it allows you to write prefix logic in python.
+
+    the source code will be transferred and executed on the machine of the node,
+    so launch-prefix function cannot be a closure,
+    arguments cannot have defaults (it may refer to outer variable),
+    and can only accept string arguments (arguments are also need to be transferred).
+    
+    example:
+    ```
+    @launch_prefix
+    def rviz_init(ns, delay):
+        import rospy
+        import os
+        import sys
+        import time
+        rviz_config = rospy.get_param(f"{ns}/rviz_config") # you can read parameters
+        rosconsole_config = rospy.get_param(f"{ns}/rosconsole_config")
+        assert sys.argv[0] == "/opt/ros/noetic/lib/rviz"
+        sys.argv[1:1] = ["-d", str(rviz_config)] # you can modify command arguments
+        os.environ["ROSCONSOLE_CONFIG_FILE"] = str(rosconsole_config) # you can change environment variables
+        time.sleep(float(delay)) # you can wait
+
+    with node(name="rviz", pkg="rviz", type="rviz", launch_prefix=rviz_init(ns(), str(1.5))):
+        pass
+    ```
+    if a module has been imported globally, it will be captured and become a closure.
+    to fix it, use `__import__` instead in this case.
+    """
+    closurevars = inspect.getclosurevars(prefix_func)
+    if closurevars.nonlocals or closurevars.globals or prefix_func.__defaults__:
+        warnings.warn(UncopyableFunctionWarning(prefix_func.__name__))
+    
+    name = prefix_func.__name__
+    code = inspect.cleandoc("\n"+inspect.getsource(prefix_func))
+    
+    @functools.wraps(prefix_func)
+    def wrapped_prefix_func(*args: str) -> List[str]:
+        args = tuple(str(arg) for arg in args)
+        return ["$(find monolaunch)/scripts/launch_prefix.py", name, code, str(len(args)), *args]
+    
+    return wrapped_prefix_func
 
 def group(ns: str = "") -> Group:
     if ns.startswith("/"):
