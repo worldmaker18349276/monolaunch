@@ -9,42 +9,12 @@ import shlex
 import subprocess
 import dataclasses
 from pathlib import Path
-from typing import Dict
 import socket
 import ipaddress
 
 import urllib.parse
-from monolaunch.yaml_utils import JSON, assert_JSON, Link, load_YAML
+from monolaunch.yaml_utils import assert_JSON, Link, load_YAML
 
-
-def assert_mapping(data: JSON) -> Dict[str, JSON]:
-    if not isinstance(data, dict):
-        raise TypeError(f"not mapping: {data}")
-    return data
-
-def assert_str(data: JSON) -> str:
-    if not isinstance(data, str):
-        raise TypeError(f"not str: {data}")
-    return data
-
-
-def is_loopback(host: str) -> bool:
-    # Direct IP address
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        pass
-
-    # Hostname: resolve all addresses
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
-
-    return any(
-        ipaddress.ip_address(addr[0]).is_loopback
-        for _family, _, _, _, addr in infos
-    )
 
 def urlquote(s: str, unsafe: str = r"%#@/:;?") -> str:
     return re.sub(
@@ -87,7 +57,7 @@ class Machine:
         return Machine(user=user, password=password, address=address, env_loader=env_loader)
     
     def reduce_local(self) -> "Machine":
-        if not self.address or is_loopback(self.address):
+        if not self.address or self.is_loopback():
             return Machine(user="", password="", address="", env_loader=self.env_loader)
         return self
 
@@ -103,6 +73,27 @@ class Machine:
     def __str__(self) -> str:
         path = urlquote(self.env_loader, unsafe="%;#?")
         return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", "", ""))
+
+    def is_loopback(self) -> bool:
+        if not self.address:
+            return True
+
+        # Direct IP address
+        try:
+            return ipaddress.ip_address(self.address).is_loopback
+        except ValueError:
+            pass
+
+        # Hostname: resolve all addresses
+        try:
+            infos = socket.getaddrinfo(self.address, None)
+        except socket.gaierror:
+            return False
+
+        return any(
+            ipaddress.ip_address(addr[0]).is_loopback
+            for _family, _, _, _, addr in infos
+        )
 
 def remote_expandvars(machine: Machine, path: str) -> str:
     password_args = ["sshpass", "-p", machine.password] if machine.password else []
@@ -165,23 +156,20 @@ def sync(params_link: str):
     load resources to given paths under remote machines.
 
     params_link is a link to a yaml file in the format:
-
-    $sync_resources:
-      - source: /path/to/source/in/local/machine
-        destination: ${ROS_HOME}/path/to/destination/in/remote/machine
-        machine: machine://user:pswd@addr/path/to/env_loader.sh
-      ...
+    ```
+    - source: /path/to/source/in/local/machine
+      destination: ${ROS_HOME}/path/to/destination/in/remote/machine
+      machine: machine://user:pswd@addr/path/to/env_loader.sh
+    ...
+    ```
     """
     print(f"sync resources: {params_link}")
     params_link_ = Link.parse(params_link)
-    params_ = load_YAML(params_link_)
-    params = assert_mapping(assert_JSON(params_))
-    sync_resources = params.get("$sync_resources", [])
-    if not isinstance(sync_resources, list):
-        curr_link = params_link_.append("$sync_resources")
-        raise TypeError(f"{curr_link} is not seq")
-    for i, resource in enumerate(sync_resources):
-        curr_link = params_link_.append("$sync_resources").append(i)
+    params = assert_JSON(load_YAML(params_link_))
+    if not isinstance(params, list):
+        raise TypeError(f"{params_link_} is not seq")
+    for i, resource in enumerate(params):
+        curr_link = params_link_.append(i)
         if not isinstance(resource, dict):
             raise TypeError(f"{curr_link} is not map")
         

@@ -939,7 +939,7 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
             launch_el.append(ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)")))
 
         # add resource loader
-        sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param)"
+        sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param + '#/$sync_resources')"
         launch_el.append(ET.Element("arg", dict(name="sync_resources_expr", default=sync_resources_expr)))
         launch_el.append(ET.Element("arg", dict(name="sync_resources", default="$(eval eval(sync_resources_expr))")))
         
