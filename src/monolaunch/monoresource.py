@@ -53,6 +53,15 @@ def urlquote(s: str, unsafe: str = r"%#@/:;?") -> str:
         s,
     )
 
+class SchemeParseError(Exception):
+    def __init__(self, scheme: str, url: str, format: str = ""):
+        self.scheme = scheme
+        self.url = url
+        self.format = format
+    
+    def __str__(self):
+        return f"invalid {self.scheme} scheme url: {self.url}" + (f"\nformat: {self.format}" if self.format else "")
+
 @dataclasses.dataclass(frozen=True)
 class Machine:
     user: str = ""
@@ -68,7 +77,7 @@ class Machine:
         """
         parse_result = urllib.parse.urlparse(url, scheme="machine")
         if parse_result.scheme != "machine":
-            raise ValueError(f"invalid machine scheme url: {url}\nformat: machine://user:pswd@addr/path/to/env_loader.sh")
+            raise SchemeParseError("machine", url, "machine://user:pswd@addr/path/to/env_loader.sh")
 
         user = urllib.parse.unquote(parse_result.username or "")
         password = urllib.parse.unquote(parse_result.password or "")
