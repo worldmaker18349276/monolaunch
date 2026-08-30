@@ -95,6 +95,12 @@ class Machine:
             for _family, _, _, _, addr in infos
         )
 
+def expandvars(path: str) -> str:
+    import os
+    os.environ['DOLLARSIGN'] = '$'
+    os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))
+    return os.path.expandvars(path)
+
 def remote_expandvars(machine: Machine, path: str) -> str:
     password_args = ["sshpass", "-p", machine.password] if machine.password else []
     remote_args = ["ssh", f"{machine.user}@{machine.address}" if machine.user else machine.address] if machine.address else ["bash", "-c"]
@@ -157,7 +163,7 @@ def sync(params_link: str):
 
     params_link is a link to a yaml file in the format:
     ```
-    - source: /path/to/source/in/local/machine
+    - source: /path/to/source/in/local/machine (can contain ${ENVVAR})
       destination: ${ROS_HOME}/path/to/destination/in/remote/machine
       machine: machine://user:pswd@addr/path/to/env_loader.sh
     ...
@@ -190,9 +196,10 @@ def sync(params_link: str):
         machine = Machine.parse(param_machine)
         machine = machine.reduce_local()
 
+        expanded_source = expandvars(source)
         expanded_destination = remote_expandvars(machine, destination)
-        print(f"rsync {source} -> {expanded_destination}")
-        rsync(source, expanded_destination, machine, check_only)
+        print(f"rsync {expanded_source} -> {expanded_destination}")
+        rsync(expanded_source, expanded_destination, machine, check_only)
 
     return True
 

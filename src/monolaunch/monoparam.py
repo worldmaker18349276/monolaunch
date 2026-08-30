@@ -606,7 +606,7 @@ class UnsupportedDeletionSynchronizationWarning(Warning):
 
 @dataclass(frozen=True)
 class SyncInfo:
-    source: Path      # /path/to/source
+    source: Path      # /path/to/source (can contain ${ENVVAR})
     destination: Path # ${ROS_HOME}/resources/sync/path/to/source
     machine: str      # machine://usr:pswd@host/path/to/env_loader.sh (empty -> local)
 
@@ -642,9 +642,10 @@ class SyncResourceManager:
         if not src_path.is_absolute():
             raise SyncResourceSourceNotAbsoluteError(resource)
         ros_home_uri = self.set_sync_source(src_path)
-        dst_path = self.get_sync_target(ros_home_uri)
-        assert dst_path is not None
-        sync_resources.append(SyncInfo(src_path, dst_path, machine))
+        src_path_env = Path(str(src_path).replace("$", r"${DOLLARSIGN}"))
+        dst_path_env = self.get_sync_target(ros_home_uri)
+        assert dst_path_env is not None
+        sync_resources.append(SyncInfo(src_path_env, dst_path_env, machine))
         return ros_home_uri
 
     def aggregate_sync_resources(self, sync_resources: List[SyncInfo]) -> Dict[str, JSON]:
