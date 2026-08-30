@@ -610,6 +610,17 @@ class SyncInfo:
     destination: Path # ${ROS_HOME}/resources/sync/path/to/source
     machine: str      # machine://usr:pswd@host/path/to/env_loader.sh (empty -> local)
 
+    @staticmethod
+    def to_list(infos: List["SyncInfo"]) -> List[JSON]:
+        return [
+            {
+                "source": str(info.source),
+                "destination": str(info.destination),
+                "machine": info.machine,
+            }
+            for info in infos
+        ]
+
 class SyncResourceManager:
     """
     manage how to deal with resource URI for synchronization.
@@ -647,19 +658,6 @@ class SyncResourceManager:
         assert dst_path_env is not None
         sync_resources.append(SyncInfo(src_path_env, dst_path_env, machine))
         return ros_home_uri
-
-    def aggregate_sync_resources(self, sync_resources: List[SyncInfo]) -> Dict[str, JSON]:
-        res: JSON = {}
-        if sync_resources:
-            res["$sync_resources"] = [
-                {
-                    "source": str(sync_resource.source),
-                    "destination": str(sync_resource.destination),
-                    "machine": sync_resource.machine,
-                }
-                for sync_resource in sync_resources
-            ]
-        return res
 
     def get_sync_target(self, uri: str) -> Optional[Path]:
         """
@@ -1621,13 +1619,17 @@ class YAMLWatcher:
         if skip_empty:
             data = deep_copy_skip_empty(data)
         if aggregate_sync_resources:
-            if data is None:
-                data = self.loader.sync_resource_manager.aggregate_sync_resources(sync_resources)
-            elif isinstance(data, dict):
-                data.update(self.loader.sync_resource_manager.aggregate_sync_resources(sync_resources))
-            else:
-                warnings.warn(RootIsNotMapWarning(self.path))
-                return
+            sync_resources_json = SyncInfo.to_list(sync_resources)
+            if sync_resources_json:
+                data = data if data is not None else {}
+
+                if not isinstance(data, dict):
+                    warnings.warn(RootIsNotMapWarning(self.path))
+                    return
+
+                if not isinstance(data.get("$sync_resources"), list):
+                    data["$sync_resources"] = []
+                data["$sync_resources"].extend(sync_resource_json) # type: ignore
 
         self.depends = depends
         self.node = node
