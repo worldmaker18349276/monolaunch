@@ -35,6 +35,7 @@ changing one YAML file on each side will cause the other YAML file to be updated
 
 from enum import Enum
 from inspect import cleandoc
+from uuid import uuid4
 from typing import Any, Dict, Generator, List, Literal, Tuple, Set, Union, Optional, Type, TypeVar, Callable, IO, overload
 import sys
 import math
@@ -1147,7 +1148,11 @@ class SourceLoader:
         return raw_source, raw_schema
 
     @raises(FileAlreadyLoadedError)
-    def _new_source(self, filepath: Path) -> Source:
+    def _new_source(self, filepath: Optional[Path]) -> Source:
+        while filepath is None:
+            filepath = Path("anon_" + str(uuid4()).replace("-", "_") + ".yaml").resolve()
+            if filepath in self.all_includes:
+                filepath = None
         if filepath in self.all_includes:
             raise FileAlreadyLoadedError(filepath)
         self.all_includes[filepath] = None
@@ -1305,14 +1310,15 @@ class SourceLoader:
         return SourcedNode(src, sources, schema_list), depends
 
     @raises(FileAlreadyLoadedError)
-    def new(self, src: Path) -> SourcedNode:
+    def new(self, src: Optional[Path]) -> SourcedNode:
         """
         make an null node assigned to given path.
         this path must be new, or you should remove it from all_includes manually.
         """
-        src = src.resolve()
+        if src is not None:
+            src = src.resolve()
         source = self._new_source(src)
-        return SourcedNode(Link(src), [source], [])
+        return SourcedNode(Link(source.link.filepath), [source], [])
 
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def get_(self, node: SourcedNode, fieldpath: Union[int, str, FieldPath]) -> Tuple[Optional[SourcedNode], Set[Path]]:
