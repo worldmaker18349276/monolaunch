@@ -501,7 +501,7 @@ def _include_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJ
         try:
             data = subloader.get_single_data()
         finally:
-            subloader.dispose()
+            subloader.dispose() # pyright: ignore[reportUnknownMemberType]
     return link.fieldpath.walk(data) # type: ignore
 
 def _merge_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSON:
@@ -542,7 +542,7 @@ def _unknown_tag_constructor(loader: ExYAMLLoader, tag_suffix: str, node: yaml.n
 
 ExYAMLLoader.add_constructor("!include", _include_constructor)
 ExYAMLLoader.add_constructor("!merge", _merge_constructor)
-ExYAMLLoader.add_multi_constructor("!", _unknown_tag_constructor)
+ExYAMLLoader.add_multi_constructor("!", _unknown_tag_constructor) # pyright: ignore[reportUnknownMemberType]
 
 # @raises(FieldAccessError)
 def load_ExYAML(link: Link) -> TaggedJSON:
@@ -556,7 +556,7 @@ def load_ExYAML(link: Link) -> TaggedJSON:
         try:
             data = loader.get_single_data()
         finally:
-            loader.dispose()
+            loader.dispose() # type: ignore
     return link.fieldpath.walk(data) # type: ignore
 
 
@@ -629,8 +629,8 @@ class ExYAMLDumper(SimpleYAMLDumper):
     pass
 
 def _tagged_scalar_representer(self: ExYAMLDumper, data: TaggedScalar):
-    node = self.represent_data(data.data)
-    return self.represent_scalar(f"!{data.tag}", node.value)
+    node = self.represent_data(data.data) # pyright: ignore[reportUnknownMemberType]
+    return self.represent_scalar(f"!{data.tag}", node.value) # pyright: ignore[reportUnknownMemberType]
 
 def _tagged_list_representer(self: ExYAMLDumper, data: TaggedList):
     return self.represent_sequence(f"!{data.tag}", data, flow_style=is_vec_like(data))
