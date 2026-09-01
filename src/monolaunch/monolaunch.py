@@ -880,7 +880,7 @@ def machine(url: str = "", *, name: str = "", address: str = "", env_loader: str
     if not machine.name:
         machine_ = ctx().find_machine(machine)
         if machine_ is None:
-            machine.name = anon(sanitize_identifier(machine.address))
+            machine.name = anon(sanitize_identifier(machine.user + "_" + machine.address))
         else:
             machine.name = machine_.name
     return machine
