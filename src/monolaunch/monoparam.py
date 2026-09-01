@@ -1629,7 +1629,7 @@ class YAMLWatcher:
 
                 if not isinstance(data.get("$sync_resources"), list):
                     data["$sync_resources"] = []
-                data["$sync_resources"].extend(sync_resource_json) # type: ignore
+                data["$sync_resources"].extend(sync_resources_json) # type: ignore
 
         self.depends = depends
         self.node = node
