@@ -313,7 +313,10 @@ class Resource:
     @staticmethod
     def parse(uri: str) -> "Resource":
         uri, context = (*uri.rsplit("?", 1), "")[:2]
-        return Resource(uri, tuple(urllib.parse.parse_qsl(context)))
+        resource = Resource(uri, tuple(urllib.parse.parse_qsl(context)))
+        if not (uri.startswith("file://") or uri.startswith("package://") or uri.startswith("ros_home://")):
+            warnings.warn(BadResourceSchemeURIWarning(resource))
+        return resource
 
     def __str__(self) -> str:
         uri = self.uri
@@ -538,6 +541,13 @@ class InvalidScalarWarning(Warning):
     
     def __str__(self):
         return f"value {self.value} is not a scalar"
+
+class BadResourceSchemeURIWarning(Warning):
+    def __init__(self, resource: Resource):
+        self.resource = resource
+    
+    def __str__(self):
+        return f"bad resource scheme URI: {self.resource}"
 
 class ManualSyncResourceWarning(Warning):
     def __init__(self, resource: Resource):
