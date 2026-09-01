@@ -406,7 +406,7 @@ class Ctx:
         tmp_param_node, _depends = self.param_loader.load(link)
         if tmp_param_node is None:
             raise FieldAccessError(link.fieldpath, str(link.filepath))
-        res, _depends = self.param_loader.resolve_all(tmp_param_node, [])
+        res, _depends = self.param_loader.resolve_all(tmp_param_node)
         # TODO: lock this param, since generated launch file depends on it now
         return res
 
@@ -822,7 +822,7 @@ class UncopyableFunctionWarning(Warning):
     def __str__(self):
         return f"function {self.func_name} is not a source-copyable function"
 
-def launch_prefix(prefix_func: Callable[[*Tuple[str, ...]], None]):
+def launch_prefix(prefix_func: Callable[..., None]):
     """
     a launch-prefix function decorator.
     it allows you to write prefix logic in python.
