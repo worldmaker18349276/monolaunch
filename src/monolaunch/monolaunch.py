@@ -684,7 +684,7 @@ class Machine:
         attrs: Dict[str, str] = {}
         attrs["name"] = self.name
         attrs["address"] = self.address
-        if self.env_loader:  attrs["env_loader"] = self.env_loader
+        if self.env_loader:  attrs["env-loader"] = self.env_loader
         if self.user:        attrs["user"] = self.user
         if self.password:    attrs["password"] = self.password
         attrs["default"] = "true" if default else "false"
