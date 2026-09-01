@@ -9,9 +9,10 @@ catkin_python_setup()
 
 catkin_package()
 
-catkin_install_python(PROGRAMS
+install(PROGRAMS
   scripts/param_loader.py
   scripts/launch_converter.py
+  scripts/launch_prefix.py
   scripts/exec.sh
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
