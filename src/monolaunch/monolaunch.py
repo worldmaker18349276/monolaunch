@@ -863,7 +863,7 @@ def launch_prefix(prefix_func: Callable[..., None]):
     @functools.wraps(prefix_func)
     def wrapped_prefix_func(*args: str) -> List[str]:
         args = tuple(str(arg) for arg in args)
-        return ["$(find monolaunch)/scripts/launch_prefix.py", name, code, str(len(args)), *args]
+        return ["rosrun", "monolaunch", "launch_prefix.py", name, code, str(len(args)), *args]
     
     return wrapped_prefix_func
 
