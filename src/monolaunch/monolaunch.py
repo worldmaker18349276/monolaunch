@@ -33,6 +33,8 @@ anon(name)                          - just like $(anon name)
 dirname()                           - just like $(dirname)
 ns()                                - get current namespace, or use ns("~") for private namespace
 @launch_prefix                      - make launch_prefix function, see `launch_prefix`
+load_logger("file.yaml#/logging")   - load logger config
+set_logger({"logger_name": "INFO"}) - set logger config directly
 
 Machine
 -------
@@ -224,6 +226,51 @@ this will load "file/path/to/subconfig.yaml", take field "/sub/field", and put i
 we actually do not set/load param via rosparam command,
 but aggregate them into a single param file using !include and !merge,
 them resolve it before launch.
+
+Logger
+------
+ros logging system of ROS compose of two parts: rosout mechanism and language specific API.
+
+rosout mechanism is simple, it is just a topic that accept logging messages.
+each logging message contain message content, location, level and node name (no logger name).
+but the functions to actually log messages differ from languages,
+they depend on logging system of each language:
+roscpp uses log4cxx, rospy uses native logging system.
+
+and that is a problem, because now we need multiple config files for different languages.
+lucky, log4cxx and python logging both use hierarchical logging framework,
+where the hierarchy of loggers allows child loggers to override configuration.
+
+for roscpp, full logger name of `ROS_XXX(...)` is "ros.{package_name}",
+and `ROS_XXX_NAMED(...)` append another name after it;
+for rospy, full logger name is the "rosout.{logger_name}",
+where `logger_name` is the argument in `rospy.logxxx(..., logger_name=...)`.
+(yes, it is inconsistent!)
+
+for example, `ROS_INFO("sth")` in package `planner` will log to `ros.planner`,
+and `ROS_INFO_NAMED("sub", "sth")` will log to `ros.planner.sub`;
+`rospy.loginfo("sth")` will log to `rosout`,
+and `rospy.loginfo("sth", logger_name="controller")` will log to `rosout.controller`,
+no matter what package it is in.
+(inconsistent again!)
+
+logger settings for API part can be setup by environment variables
+ROSCONSOLE_CONFIG_FILE and ROS_PYTHON_LOG_CONFIG_FILE initially,
+and there is no universal method for combining logger settings.
+because they only accept files, management is cumbersome in a multi-machine environment.
+
+we provide some methods to setup logger for both roscpp and rospy at once.
+the logger settings apply to all nodes in the scope,
+and can be partially overrided by logger settings in subscope.
+
+in above example, you can configure their logging levels by:
+```
+ros.planner: DEBUG
+ros.planner.sub: DEBUG
+rosout.controller: DEBUG
+```
+we will generate config files for each node and configure environment variables.
+
 """
 
 import contextlib
@@ -254,6 +301,7 @@ __all__ = [
     "run",
     "group", "node", "include",
     "set_param", "load_param", "get_value",
+    "load_logger", "set_logger",
     "remap", "set_env",
     "machine",
     "env", "find", "anon", "ns", "dirname", "launch_prefix",
@@ -287,6 +335,8 @@ class FilePathNotAbsoluteError(Exception):
 class LoopRemapError(Exception):
     pass
 
+LoggerConfig = Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]]
+
 @dataclass
 class Scope:
     ns: Tuple[str, ...] = ()
@@ -294,6 +344,7 @@ class Scope:
     default_machine: Optional["Machine"] = None
     remap: Dict[str, str] = field(default_factory=lambda: {})
     env: Dict[str, str] = field(default_factory=lambda: {})
+    logger: List[Union[Link, LoggerConfig]] = field(default_factory=lambda: [])
 
 @dataclass
 class Ctx:
@@ -467,6 +518,26 @@ class Ctx:
             merged.update(scope.env)
         return merged
 
+    # logger
+    def load_logger(self, link: Link):
+        self.scopes[-1].logger.append(link)
+
+    def set_logger(self, config: LoggerConfig):
+        self.scopes[-1].logger.append(config)
+
+    def assign_logger(self) -> bool:
+        configs = [config for scope in self.scopes for config in scope.logger]
+        if not configs: return False
+        
+        for config in configs:
+            if isinstance(config, Link):
+                self.load_param({"~$ros_logger_config": config})
+            else:
+                config_: JSONWithPath = config # pyright: ignore[reportAssignmentType]
+                self.set_param({"~$ros_logger_config": config_})
+
+        return True
+
 # -- primitive value types ----------------------------------------------------
 
 @dataclass
@@ -542,6 +613,7 @@ class Node:
     env: Dict[str, str] = field(default_factory=lambda: {})
     remap: Dict[str, str] = field(default_factory=lambda: {})
     machine: Optional["Machine"] = None
+    has_logger: bool = False
 
     _used: bool = False
 
@@ -566,7 +638,18 @@ class Node:
     def __exit__(self, *_):
         self.env = ctx().get_env()
         self.remap = ctx().get_remap()
+        self.has_logger = ctx().assign_logger()
+        if self.has_logger:
+            self.launch_prefix = self._logger_prefix() + self.launch_prefix
         ctx().pop_group()
+
+    def _logger_prefix(self):
+        return (
+            "rosrun",
+            "monolaunch",
+            "setup_logger.py",
+            _join_ns(self.ns + (self.name, "$ros_logger_config")),
+        )
 
     def to_xml(self) -> ET.Element:
         attrs: Dict[str, str] = {}
@@ -926,6 +1009,40 @@ def as_bool(s: Union[str, bool]) -> bool:
     else:
         raise ValueError(f"{s} is not valid bool literal")
 
+
+def resolve_logger_config(logger_config: JSON) -> LoggerConfig:
+    if not isinstance(logger_config, dict):
+        raise TypeError(f"expect dict, got {type(logger_config).__name__}")
+    for level in logger_config.values():
+        if level not in ("DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
+            raise TypeError(f"expect 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL', got {level}")
+    return logger_config # pyright: ignore[reportReturnType]
+
+def load_logger(config_link: Union[str, Path, Link]) -> None:
+    """
+    load ros logger config in a scope (apply to nodes in the scope).
+    
+    about config format, see `set_logger`.
+    """
+    if isinstance(config_link, str):
+        config_link = Link.parse(config_link)
+    elif isinstance(config_link, Path):
+        config_link = Link(config_link)
+    elif isinstance(config_link, Link): # pyright: ignore[reportUnnecessaryIsInstance]
+        config_link = config_link
+    else:
+        raise TypeError
+
+    ctx().load_logger(config_link)
+
+def set_logger(config: Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]]) -> None:
+    """
+    setup ros logger config in a scope (apply to nodes in the scope).
+
+    `config` is a map from logger name to logging level (DEBUG, INFO, WARN, ERROR, FATAL).
+    """
+    config = resolve_logger_config(config) # pyright: ignore[reportArgumentType]
+    ctx().set_logger(config)
 
 class ForeignSyncResourceWarning(Warning):
     def __init__(self, resource_name: str, runtime_machine_name: str, host_node_name: str, host_machine_name: str):
