@@ -444,6 +444,9 @@ class MachineCtx:
         """
         parse machine scheme url
         format: machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2
+        
+        or: machine://user:pswd@addr/path/to/devel/setup.bash?=setup
+        env_loader will be rewritten as: `/usr/bin/bash -c 'source /path/to/devel/setup.bash && ROS_IP={address} exec "$@"' --`
         """
         return MachineCtx(name="", machine=Machine.parse(url))
 

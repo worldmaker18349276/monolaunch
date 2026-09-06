@@ -16,6 +16,7 @@ from typing import Tuple
 import urllib.parse
 from monolaunch.yaml_utils import assert_JSON, Link, load_YAML
 
+IP_REGEX = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
 def urlquote(s: str, unsafe: str = r"%#@/:;?") -> str:
     return re.sub(
@@ -45,6 +46,9 @@ class Machine:
         """
         parse machine scheme url
         format: machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2
+        
+        or: machine://user:pswd@addr/path/to/devel/setup.bash?=setup
+        env_loader will be rewritten as: `/usr/bin/bash -c 'source /path/to/devel/setup.bash && ROS_IP={address} exec "$@"' --`
         """
         parse_result = urllib.parse.urlparse(url, scheme="machine")
         if parse_result.scheme != "machine":
@@ -54,9 +58,25 @@ class Machine:
         password = urllib.parse.unquote(parse_result.password or "")
         address = parse_result.hostname or ""
         env_loader_args = urllib.parse.unquote(parse_result.path)
-        cmd, args = (*env_loader_args.rsplit("?", 1), "")[:2]
-        args = tuple(v for k, v in urllib.parse.parse_qsl(args) if k == "arg")
+        cmd, args_ = (*env_loader_args.rsplit("?", 1), "")[:2]
+        args_ = urllib.parse.parse_qsl(args_)
+        args = tuple(v for k, v in args_ if k == "arg")
         env_loader = (cmd, *args)
+        
+        if ("", "setup") in args_:
+            if not address:
+                setenv = ""
+            elif IP_REGEX.match(address):
+                setenv = shlex.quote(f"ROS_IP={address}")
+            else:
+                setenv = shlex.quote(f"ROS_HOSTNAME={address}")
+            setup_bash = shlex.quote(env_loader[0])
+            env_loader = (
+                "/usr/bin/bash",
+                "-c",
+                f'source {setup_bash} && {setenv} exec "$@"',
+                "--",
+            )
 
         return Machine(user=user, password=password, address=address, env_loader=env_loader)
     
