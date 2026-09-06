@@ -52,6 +52,48 @@ with remote_machine:
     with node(name="remote_node"):
         pass
 ```
+just like `<machine>` tag, you can call `machine(...)` with explicit arguments (user, password, address, env_loader),
+or use machine scheme url, which is in the form: `machine://usr:psd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2`.
+
+there are three roles for launching nodes on multiple machines: launcher, worker and master.
+they can locate in different machines, and require some environmental setups:
+- launcher:
+  `ROS_MASTER_URI` should be set, and it will be passed to the node process.
+  `ROS_IP` should be set, that is for launch server.
+- worker:
+  `ROS_IP` should be set, which is for advertising topics.
+  it should be setup by env_loader from roslaunch.
+- master:
+  `ROS_IP` should be set, which is for running roscore.
+  it must match the address of `ROS_MASTER_URI`.
+
+if `ROS_HOSTNAME` is set (by default, ros uses its own machine name as hostname)
+or `ROS_MASTER_URI` uses hostname (by default, ros uses its own machine name as hostname),
+it is needed to setup `/etc/hosts` for all machines, so that they can find each other.
+the benefit of using `ROS_HOSTNAME` is that it is more robust to network changes.
+one can configure SSH keys for each workers in launcher's machine,
+so that no plain-text password is needed to provide to roslaunch.
+
+for two nodes with remote machine tags which only differ from env-loader,
+they will be prefixed with coorresponding env-loader.
+however, when the user and address of machine of a node is equivalent to localhost,
+it will be executed directly without prefixing with env-loader.
+monolaunch will warn on this case.
+
+by default, roslaunch will start roscore automatically if roscore isn't open,
+but if ros master is configured as remote machine, roslaunch will wait for it.
+this inconsistency has not been resolved because it is a bad practice.
+it is recommended to run roscore by yourself instead of relying on roslaunch.
+however it would be convenient if it can launch roscore remotely,
+so we add `--with-roscore {machine_url}` option to the launcher.
+
+to launch nodes remotely, one should setup `ROS_IP` and env-loader script on remote machine.
+and `/etc/hosts` should also be configured if `ROS_HOSTNAME` is used.
+the configuration files are scattered across multiple machines, which is inconvenient.
+luckly, env-loader scripts can be replaced by treat: `bash -c '...' --`.
+we wrap it into simplified machine scheme url, just use: `machine://usr@addr/path/to/devel/setup.bash?=setup`.
+on the worker machine, all you need to do is keep the builds in sync.
+most of network settings can be configured on the launcher machine.
 
 ### Remap
 the original mechanism of `<remap>` is:
