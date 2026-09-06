@@ -892,13 +892,13 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
 
     argparser = argparse.ArgumentParser(
         add_help=False,
-        usage="%(prog)s [--dry-run] [--with-roscore MACHINE_URL] [ARGS ...]",
+        usage="%(prog)s [--dry-run] [--with-roscore] [ARGS ...]",
     )
     argparser.add_argument("--dry-run", action="store_true", help="generate launch file only")
-    argparser.add_argument("--with-roscore", type=str, default="", help="launch remote roscore")
+    argparser.add_argument("--with-roscore", action="store_true", help="launch remote roscore")
     args, unknown = argparser.parse_known_args()
     sys.argv[1:] = unknown
-    with_roscore = str(args.with_roscore)
+    with_roscore = bool(args.with_roscore)
     dry_run = bool(args.dry_run)
     
     try:
@@ -906,38 +906,14 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
     except Exception:
         traceback.print_exc()
         exit(1)
-    
-    with_roscore = with_roscore or _get_master_machine(launch_filepath)
 
     cmd = ["roslaunch", str(launch_filepath), *sys.argv[1:]]
     if with_roscore:
-        cmd = ["rosrun", "monolaunch", "with_roscore.py", with_roscore, *cmd]
+        cmd = ["rosrun", "monolaunch", "with_roscore.py", *cmd]
     if dry_run:
         print(shlex.join(cmd))
         return
     os.execvp(cmd[0], cmd)
-
-def _get_master_machine(launch_file: Path) -> str:
-    root = ET.parse(launch_file).getroot()
-
-    machines = {
-        machine.get("name"): machine.attrib
-        for machine in root.findall("machine")
-    }
-
-    for node in root.findall("master"):
-        machine_name = node.get("machine")
-        assert machine_name is not None
-        machine_tag = machines.get(machine_name)
-        assert machine_tag is not None
-        user = machine_tag.get("user", "")
-        password = machine_tag.get("password", "")
-        address = machine_tag.get("address", "")
-        env_loader = machine_tag.get("env-loader", "")
-        machine = Machine(user=user, password=password, address=address, env_loader=tuple(shlex.split(env_loader)))
-        return str(machine)
-
-    return ""
 
 def _indent(el: ET.Element, level: int = 0):
     indent = "\n" + "  " * level

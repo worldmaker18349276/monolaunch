@@ -88,10 +88,19 @@ it is recommended to run roscore by yourself instead of relying on roslaunch.
 I think running roscore alongside with roslaunch is better than keeping roscore up,
 later one make previous parameters interfere with next run, causing awkward bugs.
 it would be convenient if it can launch roscore remotely,
-so we add `--with-roscore {machine_url}` option to the launcher.
-since it is impossible to launch roscore using roslaunch,
-this method only work for non-dry-run mode,
-in such case `--with-roscore` will be feeded with machine url from master tag.
+so we add master node to the launcher:
+```python
+with master_machine:
+    with master(): # roscore will be launched at master_machine
+        pass
+```
+it will be translated into `<master machine="..."/>`,
+which is removed tag and will be skipped by roslaunch.
+it is impossible to launch roscore as a node inside roslaunch,
+you need to prefix `roslaunch` command with `with_roscore.py`,
+which will parse master tag and launch roscore remotely.
+it is off by default for calling `run(launch_func)`,
+and can be turned on by `--with-roscore`.
 
 to launch nodes remotely, one should setup `ROS_IP` and env-loader script on remote machine.
 and `/etc/hosts` should also be configured if `ROS_HOSTNAME` is used.

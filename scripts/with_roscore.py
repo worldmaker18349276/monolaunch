@@ -1,16 +1,47 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
+import shlex
 import subprocess
 import signal
 import sys
+import os
 import time
+from typing import Optional
 from monolaunch.monoresource import Machine
+import xml.etree.ElementTree as ET
+
+
+def _get_master_machine(launch_file: Path) -> Optional[Machine]:
+    root = ET.parse(launch_file).getroot()
+
+    machines = {
+        machine.get("name"): machine.attrib
+        for machine in root.findall("machine")
+    }
+
+    for node in root.findall("master"):
+        machine_name = node.get("machine")
+        assert machine_name is not None
+        machine_tag = machines.get(machine_name)
+        assert machine_tag is not None
+        user = machine_tag.get("user", "")
+        password = machine_tag.get("password", "")
+        address = machine_tag.get("address", "")
+        env_loader = machine_tag.get("env-loader", "")
+        return Machine(user=user, password=password, address=address, env_loader=tuple(shlex.split(env_loader)))
+
+    return None
 
 def main():
-    machine = Machine.parse(sys.argv[1])
-    command = sys.argv[2:]
+    command = sys.argv[1:]
+    if len(command) < 2 or command[0] != "roslaunch" or not command[1].endswith(".launch"):
+        raise ValueError("with_roscore.py must be prefixed before `roslaunch <launch_file.launch> ...`")
+    machine = _get_master_machine(Path(command[1])) or Machine()
 
-    machine = machine.reduce_local()
+    ros_master_uri = f"http://{machine.address}:11311"
+    os.environ["ROS_MASTER_URI"] = ros_master_uri
+
     ssh = subprocess.Popen(machine.command(["roscore"]))
 
     def cleanup(*_):
