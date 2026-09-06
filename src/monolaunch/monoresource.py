@@ -15,6 +15,8 @@ from typing import Sequence, Tuple
 import urllib.parse
 from monolaunch.yaml_utils import assert_JSON, Link, load_YAML
 
+# TODO: typecheck user input
+
 IP_REGEX = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
 def urlquote(s: str, unsafe: str = r"%#@/:;?") -> str:
@@ -37,7 +39,7 @@ class SchemeParseError(Exception):
 class Machine:
     user: str = ""
     password: str = ""
-    address: str = ""
+    address: str = "localhost"
     env_loader: Tuple[str, ...] = ()
 
     @staticmethod
@@ -55,33 +57,34 @@ class Machine:
 
         user = urllib.parse.unquote(parse_result.username or "")
         password = urllib.parse.unquote(parse_result.password or "")
-        address = parse_result.hostname or ""
+        address = parse_result.hostname or "localhost"
         env_loader_args = urllib.parse.unquote(parse_result.path)
-        cmd, args_ = (*env_loader_args.rsplit("?", 1), "")[:2]
-        args_ = urllib.parse.parse_qsl(args_)
-        args = tuple(v for k, v in args_ if k == "arg")
-        env_loader = (cmd, *args)
+        if env_loader_args:
+            cmd, args_ = (*env_loader_args.rsplit("?", 1), "")[:2]
+            args_ = urllib.parse.parse_qsl(args_)
+            args = tuple(v for k, v in args_ if k == "arg")
+            env_loader = (cmd, *args)
         
-        if ("", "setup") in args_:
-            if not address:
-                setenv = ""
-            elif IP_REGEX.match(address):
-                setenv = shlex.quote(f"ROS_IP={address}")
-            else:
-                setenv = shlex.quote(f"ROS_HOSTNAME={address}")
-            setup_bash = shlex.quote(env_loader[0])
-            env_loader = (
-                "/usr/bin/bash",
-                "-c",
-                f'source {setup_bash} && {setenv} exec "$@"',
-                "--",
-            )
+            if ("", "setup") in args_:
+                if IP_REGEX.match(address):
+                    setenv = shlex.quote(f"ROS_IP={address}")
+                else:
+                    setenv = shlex.quote(f"ROS_HOSTNAME={address}")
+                setup_bash = shlex.quote(env_loader[0])
+                env_loader = (
+                    "/usr/bin/bash",
+                    "-c",
+                    f'source {setup_bash} && {setenv} exec "$@"',
+                    "--",
+                )
+        else:
+            env_loader = ()
 
         return Machine(user=user, password=password, address=address, env_loader=env_loader)
     
     def reduce_local(self) -> "Machine":
-        if not self.address or self.is_local():
-            return Machine(user="", password="", address="", env_loader=self.env_loader)
+        if self.is_local():
+            return Machine(user="", password="", address="localhost", env_loader=self.env_loader)
         return self
 
     def get_netloc(self) -> str:
@@ -122,7 +125,8 @@ class Machine:
 
     def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True) -> Tuple[str, ...]:
         password_args = ["sshpass", "-p", self.password] if self.password else []
-        remote_args = ["ssh", f"{self.user}@{self.address}" if self.user else self.address] if self.address else ["bash", "-c"]
+        is_local = self.address == "localhost" and self.user == ""
+        remote_args = ["ssh", f"{self.user}@{self.address}" if self.user else self.address] if not is_local else ["bash", "-c"]
         if with_env_loader and self.env_loader:
             remote_cmd = (*self.env_loader, *remote_cmd)
         return (
@@ -139,6 +143,7 @@ def expandvars(path: str) -> str:
     os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))
     return os.path.expandvars(path)
 
+# TODO: too slow!
 def remote_expandvars(machine: Machine, path: str) -> str:
     cmd = machine.command([
         "python3", "-c",
@@ -166,7 +171,8 @@ def rsync(source: str, destination: str, machine: Machine, check_only: bool):
 
     password_args = ["sshpass", "-p", machine.password] if machine.password else []
 
-    destination_ = (f"{machine.user}@" if machine.user else "") + (f"{machine.address}:" if machine.address else "") + destination
+    is_local = machine.address == "localhost" and machine.user == ""
+    destination_ = ((f"{machine.user}@" if machine.user else "") + f"{machine.address}:" if not is_local else "") + destination
     if check_only:
         print(f"check transfer {source} -> {destination_}")
         result = subprocess.run([
