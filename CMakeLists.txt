@@ -14,6 +14,7 @@ install(PROGRAMS
   scripts/launch_converter.py
   scripts/launch_prefix.py
   scripts/setup_logger.py
+  scripts/with_roscore.py
   scripts/exec.sh
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

@@ -10,6 +10,7 @@ see README for detail.
 
 # TODO: typecheck user input
 
+import argparse
 import contextlib
 import functools
 import inspect
@@ -655,6 +656,8 @@ def group(ns: str = "") -> Group:
 def machine(url: str = "", *, name: str = "", address: str = "", env_loader: Sequence[str] = (), user: str = "", password: str = "") -> MachineCtx:
     if url:
         machine = MachineCtx.parse(url)
+        if name:
+            machine.name = name
     else:
         machine = MachineCtx(name=name, machine=Machine(address=address, env_loader=tuple(env_loader), user=user, password=password))
     if not machine.name:
@@ -855,10 +858,14 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
     if launch_func is None:
         return lambda launch_func: run(launch_func, use_param_loader=use_param_loader) # type: ignore
 
-    dry_run = False
-    if "--dry-run" in sys.argv:
-        sys.argv.remove("--dry-run")
-        dry_run = True
+    argparser = argparse.ArgumentParser(
+        add_help=False,
+        usage="%(prog)s [--dry-run] [--with-roscore MACHINE_URL] [ARGS ...]",
+    )
+    argparser.add_argument("--dry-run", action="store_true", help="generate launch file only")
+    argparser.add_argument("--with-roscore", type=str, help="launch remote roscore")
+    args, unknown = argparser.parse_known_args()
+    sys.argv[1:] = unknown
     
     try:
         launch_filepath = generate(launch_func=launch_func, use_param_loader=use_param_loader)
@@ -867,7 +874,9 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
         exit(1)
 
     cmd = ["roslaunch", str(launch_filepath), *sys.argv[1:]]
-    if dry_run:
+    if args.with_roscore:
+        cmd = ["rosrun", "monolaunch", "with_roscore.py", str(args.with_roscore), *cmd]
+    if args.dry_run:
         print(shlex.join(cmd))
         return
     os.execvp(cmd[0], cmd)
