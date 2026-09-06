@@ -39,6 +39,7 @@ Params are hoisted to the top of the generated file.
 | @launch_prefix                      | make launch_prefix function, see `launch_prefix`                       |
 | load_logger("file.yaml#/logging")   | load logger config                                                     |
 | set_logger({"logger_name": "INFO"}) | set logger config directly                                             |
+| with master()                       | borrow removed `<master>` tag, for launching roscore remotely          |
 
 ### Machine
 the original machanism of `<machine default="true">` simply sets to default globally,
@@ -84,8 +85,13 @@ by default, roslaunch will start roscore automatically if roscore isn't open,
 but if ros master is configured as remote machine, roslaunch will wait for it.
 this inconsistency has not been resolved because it is a bad practice.
 it is recommended to run roscore by yourself instead of relying on roslaunch.
-however it would be convenient if it can launch roscore remotely,
+I think running roscore alongside with roslaunch is better than keeping roscore up,
+later one make previous parameters interfere with next run, causing awkward bugs.
+it would be convenient if it can launch roscore remotely,
 so we add `--with-roscore {machine_url}` option to the launcher.
+since it is impossible to launch roscore using roslaunch,
+this method only work for non-dry-run mode,
+in such case `--with-roscore` will be feeded with machine url from master tag.
 
 to launch nodes remotely, one should setup `ROS_IP` and env-loader script on remote machine.
 and `/etc/hosts` should also be configured if `ROS_HOSTNAME` is used.

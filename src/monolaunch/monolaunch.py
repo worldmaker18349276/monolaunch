@@ -35,7 +35,7 @@ from .monoresource import Machine
 
 __all__ = [
     "run",
-    "group", "node", "include",
+    "group", "node", "include", "master",
     "set_param", "load_param", "get_value",
     "load_logger", "set_logger",
     "remap", "set_env",
@@ -94,6 +94,7 @@ class Ctx:
     nodes: Dict[Union[str, int], Union["Node", "Include"]] = field(default_factory=lambda: {})
     machines: Dict[str, "MachineCtx"] = field(default_factory=lambda: {"local": MachineCtx(name="local", machine=Machine(address="localhost"))})
     params_filepath: Path = field(default_factory=lambda: Path(".yaml"))
+    master: Optional["Master"] = None
 
     def __post_init__(self):
         self.scopes.append(Scope(default_machine=self.local_machine))
@@ -419,6 +420,33 @@ class Node:
             r = ET.SubElement(el, "remap"); r.set("from", f); r.set("to", t)
         return el
 
+@dataclass
+class Master:
+    machine: Optional["MachineCtx"] = None
+
+    def __enter__(self):
+        if ctx().master is not None:
+            raise MultipleUseError(f"master cannot be re-declared")
+
+        if ctx().is_private:
+            raise UseInPrivateScopeError(f"master cannot be used inside node or include")
+
+        ctx().master = self
+        self.machine = ctx().default_machine
+        ctx().add_machine(self.machine)
+        ctx().push_group((), False)
+        return self
+
+    def __exit__(self, *_):
+        ctx().pop_group()
+
+    def to_xml(self) -> ET.Element:
+        attrs: Dict[str, str] = {}
+        if self.machine:
+            attrs["machine"] = self.machine.name
+        el = ET.Element("master", attrs)
+        return el
+
 def urlquote(s: str, unsafe: str = r"%#@/:;?") -> str:
     return re.sub(
         f"[{re.escape(unsafe)}]",
@@ -668,6 +696,9 @@ def machine(url: str = "", *, name: str = "", address: str = "", env_loader: Seq
             machine.name = machine_.name
     return machine
 
+def master() -> Master:
+    return Master()
+
 def node(*, name: str = "", pkg: str = "", type: Union[str, Path],
          output: Literal["log", "screen"] = "log", cwd: Literal["ROS_HOME", "node"] = "ROS_HOME",
          args: Sequence[Any] = (), respawn: bool = False, respawn_delay: float = 30.0,
@@ -835,9 +866,10 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
         for machine in ctx().machines.values():
             launch_el.append(machine.to_xml())
 
-        # add <node> and <include>
-        nodes = list(ctx().nodes.values())
-        for node in nodes:
+        # add <master>, <node> and <include>
+        if master := ctx().master:
+            launch_el.append(master.to_xml())
+        for node in list(ctx().nodes.values()):
             if isinstance(node, Node):
                 launch_el.append(node.to_xml())
 
@@ -863,23 +895,49 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
         usage="%(prog)s [--dry-run] [--with-roscore MACHINE_URL] [ARGS ...]",
     )
     argparser.add_argument("--dry-run", action="store_true", help="generate launch file only")
-    argparser.add_argument("--with-roscore", type=str, help="launch remote roscore")
+    argparser.add_argument("--with-roscore", type=str, default="", help="launch remote roscore")
     args, unknown = argparser.parse_known_args()
     sys.argv[1:] = unknown
+    with_roscore = str(args.with_roscore)
+    dry_run = bool(args.dry_run)
     
     try:
         launch_filepath = generate(launch_func=launch_func, use_param_loader=use_param_loader)
     except Exception:
         traceback.print_exc()
         exit(1)
+    
+    with_roscore = with_roscore or _get_master_machine(launch_filepath)
 
     cmd = ["roslaunch", str(launch_filepath), *sys.argv[1:]]
-    if args.with_roscore:
-        cmd = ["rosrun", "monolaunch", "with_roscore.py", str(args.with_roscore), *cmd]
-    if args.dry_run:
+    if with_roscore:
+        cmd = ["rosrun", "monolaunch", "with_roscore.py", with_roscore, *cmd]
+    if dry_run:
         print(shlex.join(cmd))
         return
     os.execvp(cmd[0], cmd)
+
+def _get_master_machine(launch_file: Path) -> str:
+    root = ET.parse(launch_file).getroot()
+
+    machines = {
+        machine.get("name"): machine.attrib
+        for machine in root.findall("machine")
+    }
+
+    for node in root.findall("master"):
+        machine_name = node.get("machine")
+        assert machine_name is not None
+        machine_tag = machines.get(machine_name)
+        assert machine_tag is not None
+        user = machine_tag.get("user", "")
+        password = machine_tag.get("password", "")
+        address = machine_tag.get("address", "")
+        env_loader = machine_tag.get("env-loader", "")
+        machine = Machine(user=user, password=password, address=address, env_loader=tuple(shlex.split(env_loader)))
+        return str(machine)
+
+    return ""
 
 def _indent(el: ET.Element, level: int = 0):
     indent = "\n" + "  " * level
