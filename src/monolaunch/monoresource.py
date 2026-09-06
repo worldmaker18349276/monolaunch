@@ -10,9 +10,8 @@ import subprocess
 import dataclasses
 from pathlib import Path
 import socket
-import ipaddress
 
-from typing import Tuple
+from typing import Sequence, Tuple
 import urllib.parse
 from monolaunch.yaml_utils import assert_JSON, Link, load_YAML
 
@@ -52,7 +51,7 @@ class Machine:
         """
         parse_result = urllib.parse.urlparse(url, scheme="machine")
         if parse_result.scheme != "machine":
-            raise SchemeParseError("machine", url, "machine://user:pswd@addr/path/to/env_loader.sh")
+            raise SchemeParseError("machine", url, "machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2")
 
         user = urllib.parse.unquote(parse_result.username or "")
         password = urllib.parse.unquote(parse_result.password or "")
@@ -81,7 +80,7 @@ class Machine:
         return Machine(user=user, password=password, address=address, env_loader=env_loader)
     
     def reduce_local(self) -> "Machine":
-        if not self.address or self.is_loopback():
+        if not self.address or self.is_local():
             return Machine(user="", password="", address="", env_loader=self.env_loader)
         return self
 
@@ -102,27 +101,38 @@ class Machine:
             path += "?" + args
         return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", "", ""))
 
-    def is_loopback(self) -> bool:
-        if not self.address:
-            return True
-
-        # Direct IP address
+    def is_local(self):
+        # see: https://github.com/ros/ros_comm/blob/noetic-devel/tools/roslaunch/src/roslaunch/core.py#L86
         try:
-            return ipaddress.ip_address(self.address).is_loopback
-        except ValueError:
-            pass
-
-        # Hostname: resolve all addresses
-        try:
-            infos = socket.getaddrinfo(self.address, None)
+            # If Python has ipv6 disabled but machine.address can be resolved somehow to an ipv6 address, then host[4][0] will be int
+            machine_ips = [host[4][0] for host in socket.getaddrinfo(self.address, 0, 0, 0, socket.SOL_TCP) if isinstance(host[4][0], str)]
         except socket.gaierror:
-            return False
+            raise ValueError(f"cannot resolve host address for machine [{self.address}]")
+        import rosgraph.network # pyright: ignore[reportMissingImports]
+        local_addresses = ['localhost'] + rosgraph.network.get_local_addresses() # type: ignore
+        # check 127/8 and local addresses
+        is_local = ([ip for ip in machine_ips if (ip.startswith('127.') or ip == '::1')] != [])
+        is_local = is_local or (set(machine_ips) & set(local_addresses) != set()) # pyright: ignore[reportUnknownArgumentType]
 
-        return any(
-            ipaddress.ip_address(addr[0]).is_loopback
-            for _family, _, _, _, addr in infos
+        #491: override local to be ssh if machine.user != local user
+        if is_local and self.user:
+            import getpass
+            is_local = self.user == getpass.getuser()
+        return is_local
+
+    def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True) -> Tuple[str, ...]:
+        password_args = ["sshpass", "-p", self.password] if self.password else []
+        remote_args = ["ssh", f"{self.user}@{self.address}" if self.user else self.address] if self.address else ["bash", "-c"]
+        if with_env_loader and self.env_loader:
+            remote_cmd = (*self.env_loader, *remote_cmd)
+        return (
+            *password_args,
+            *remote_args,
+            shlex.join(remote_cmd),
         )
 
+# TODO: ban unset
+# TODO: prevent bad path
 def expandvars(path: str) -> str:
     import os
     os.environ['DOLLARSIGN'] = '$'
@@ -130,9 +140,7 @@ def expandvars(path: str) -> str:
     return os.path.expandvars(path)
 
 def remote_expandvars(machine: Machine, path: str) -> str:
-    password_args = ["sshpass", "-p", machine.password] if machine.password else []
-    remote_args = ["ssh", f"{machine.user}@{machine.address}" if machine.user else machine.address] if machine.address else ["bash", "-c"]
-    remote_cmd = [
+    cmd = machine.command([
         "python3", "-c",
         "; ".join([
             "import os",
@@ -140,32 +148,23 @@ def remote_expandvars(machine: Machine, path: str) -> str:
             "os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))",
             f"print(os.path.expandvars({str(path)!r}), end='')"
         ])
-    ]
-    if machine.env_loader:
-        remote_cmd = [machine.env_loader, *remote_cmd]
+    ])
 
-    result = subprocess.run([
-        *password_args,
-        *remote_args,
-        shlex.join(remote_cmd),
-    ], capture_output=True, text=True, check=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return result.stdout
 
 
 def rsync(source: str, destination: str, machine: Machine, check_only: bool):
-    password_args = ["sshpass", "-p", machine.password] if machine.password else []
-
     if Path(source).exists() and Path(source).is_dir():
         source = str(Path(source)) + "/"
 
-    remote_args = ["ssh", f"{machine.user}@{machine.address}" if machine.user else machine.address] if machine.address else ["bash", "-c"]
     dst_parent = str(Path(destination).parent)
     print(f"create parent directory {dst_parent}")
-    subprocess.run([
-        *password_args,
-        *remote_args,
-        shlex.join(["mkdir", "-p", dst_parent]),
-    ], check=True)
+
+    cmd = machine.command(["mkdir", "-p", dst_parent], with_env_loader=False)
+    subprocess.run(cmd, check=True)
+
+    password_args = ["sshpass", "-p", machine.password] if machine.password else []
 
     destination_ = (f"{machine.user}@" if machine.user else "") + (f"{machine.address}:" if machine.address else "") + destination
     if check_only:
@@ -193,7 +192,7 @@ def sync(params_link: str):
     ```
     - source: /path/to/source/in/local/machine (can contain ${ENVVAR})
       destination: ${ROS_HOME}/path/to/destination/in/remote/machine
-      machine: machine://user:pswd@addr/path/to/env_loader.sh
+      machine: machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2
     ...
     ```
     """
