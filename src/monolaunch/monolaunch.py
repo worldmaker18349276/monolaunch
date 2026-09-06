@@ -8,6 +8,8 @@ Params are hoisted to the top of the generated file.
 see README for detail.
 """
 
+# TODO: typecheck user input
+
 import contextlib
 import functools
 import inspect
@@ -68,6 +70,9 @@ class FilePathNotAbsoluteError(Exception):
 class LoopRemapError(Exception):
     pass
 
+class LocalMachineWithEnvLoaderWarning(Warning):
+    pass
+
 LoggerConfig = Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]]
 
 @dataclass
@@ -125,12 +130,14 @@ class Ctx:
         self.nodes[id(include)] = include
 
     def add_machine(self, machine: "MachineCtx"):
-        if machine.name in self.machines and self.machines[machine.name].machine != machine.machine:
+        if machine.name in self.machines and not self.find_machine(machine.machine):
             raise DuplicatedNameError(f"machine name {machine.name!r} is already used")
+        if machine.machine.is_local() and machine.machine.env_loader:
+            warnings.warn(LocalMachineWithEnvLoaderWarning(f"machine {machine.name} is local but env-loader is given"))
         self.machines[machine.name] = machine
     
-    def find_machine(self, machine: "MachineCtx") -> Optional["MachineCtx"]:
-        return next((machines_ for machines_ in self.machines.values() if machines_.machine == machine.machine), None)
+    def find_machine(self, machine: Machine) -> Optional["MachineCtx"]:
+        return next((machines_ for machines_ in self.machines.values() if machines_.machine == machine), None)
 
     def push_group(self, ns: Tuple[str, ...] = (), is_private: bool = False, default_machine: Optional["MachineCtx"] = None):
         self.scopes.append(Scope(ns, is_private, default_machine))
@@ -651,7 +658,7 @@ def machine(url: str = "", *, name: str = "", address: str = "", env_loader: Seq
     else:
         machine = MachineCtx(name=name, machine=Machine(address=address, env_loader=tuple(env_loader), user=user, password=password))
     if not machine.name:
-        machine_ = ctx().find_machine(machine)
+        machine_ = ctx().find_machine(machine.machine)
         if machine_ is None:
             machine.name = anon(sanitize_identifier(machine.machine.user + "_" + machine.machine.address))
         else:
@@ -859,11 +866,11 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
         traceback.print_exc()
         exit(1)
 
+    cmd = ["roslaunch", str(launch_filepath), *sys.argv[1:]]
     if dry_run:
-        print(shlex.join(["roslaunch", str(launch_filepath), *sys.argv[1:]]))
+        print(shlex.join(cmd))
         return
-    import os
-    os.execvp("roslaunch", ["roslaunch", str(launch_filepath), *sys.argv[1:]])
+    os.execvp(cmd[0], cmd)
 
 def _indent(el: ET.Element, level: int = 0):
     indent = "\n" + "  " * level
