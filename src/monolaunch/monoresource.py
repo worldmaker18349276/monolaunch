@@ -12,6 +12,7 @@ from pathlib import Path
 import socket
 import ipaddress
 
+from typing import Tuple
 import urllib.parse
 from monolaunch.yaml_utils import assert_JSON, Link, load_YAML
 
@@ -37,13 +38,13 @@ class Machine:
     user: str = ""
     password: str = ""
     address: str = ""
-    env_loader: str = ""
+    env_loader: Tuple[str, ...] = ()
 
     @staticmethod
     def parse(url: str) -> "Machine":
         """
         parse machine scheme url
-        format: machine://user:pswd@addr/path/to/env_loader.sh
+        format: machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2
         """
         parse_result = urllib.parse.urlparse(url, scheme="machine")
         if parse_result.scheme != "machine":
@@ -52,7 +53,10 @@ class Machine:
         user = urllib.parse.unquote(parse_result.username or "")
         password = urllib.parse.unquote(parse_result.password or "")
         address = parse_result.hostname or ""
-        env_loader = urllib.parse.unquote(parse_result.path)
+        env_loader_args = urllib.parse.unquote(parse_result.path)
+        cmd, args = (*env_loader_args.rsplit("?", 1), "")[:2]
+        args = tuple(v for k, v in urllib.parse.parse_qsl(args) if k == "arg")
+        env_loader = (cmd, *args)
 
         return Machine(user=user, password=password, address=address, env_loader=env_loader)
     
@@ -71,7 +75,11 @@ class Machine:
         return netloc
 
     def __str__(self) -> str:
-        path = urlquote(self.env_loader, unsafe="%;#?")
+        cmd, *args = self.env_loader
+        path = urlquote(cmd, unsafe="%;#?")
+        args = urllib.parse.urlencode([("arg", arg) for arg in args])
+        if args or "?" in path:
+            path += "?" + args
         return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", "", ""))
 
     def is_loopback(self) -> bool:

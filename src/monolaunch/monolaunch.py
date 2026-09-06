@@ -22,15 +22,13 @@ from dataclasses import MISSING, dataclass, field
 from collections import ChainMap
 import sys
 import os
-import socket
-import ipaddress
-import urllib.parse
 import shlex
 from uuid import uuid4
 import yaml
 from monolaunch.yaml_utils import JSON, FieldAccessError, FieldPath, Link
 from . import monoparam
 from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoresource import Machine
 
 __all__ = [
     "run",
@@ -76,7 +74,7 @@ LoggerConfig = Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]]
 class Scope:
     ns: Tuple[str, ...] = ()
     is_private: bool = False
-    default_machine: Optional["Machine"] = None
+    default_machine: Optional["MachineCtx"] = None
     remap: Dict[str, str] = field(default_factory=lambda: {})
     env: Dict[str, str] = field(default_factory=lambda: {})
     logger: List[Union[Link, LoggerConfig]] = field(default_factory=lambda: [])
@@ -88,7 +86,7 @@ class Ctx:
     param_node: Optional[SourcedNode] = None
     # node_name -> node, include_index -> include
     nodes: Dict[Union[str, int], Union["Node", "Include"]] = field(default_factory=lambda: {})
-    machines: Dict[str, "Machine"] = field(default_factory=lambda: {"local": Machine(name="local", address="localhost")})
+    machines: Dict[str, "MachineCtx"] = field(default_factory=lambda: {"local": MachineCtx(name="local", machine=Machine(address="localhost"))})
     params_filepath: Path = field(default_factory=lambda: Path(".yaml"))
 
     def __post_init__(self):
@@ -104,15 +102,15 @@ class Ctx:
         return tuple(x for scope in scopes for x in scope.ns if x)
 
     @property
-    def local_machine(self) -> "Machine":
+    def local_machine(self) -> "MachineCtx":
         return self.machines["local"]
 
     @property
-    def default_machine(self) -> "Machine":
+    def default_machine(self) -> "MachineCtx":
         return next(scope.default_machine for scope in self.scopes[::-1] if scope.default_machine)
 
     @default_machine.setter
-    def default_machine(self, default_machine: "Machine"):
+    def default_machine(self, default_machine: "MachineCtx"):
         self.scopes[-1].default_machine = default_machine
 
     def add_node(self, ns: Tuple[str, ...], node: "Node"):
@@ -126,15 +124,15 @@ class Ctx:
         assert id(include) not in self.nodes
         self.nodes[id(include)] = include
 
-    def add_machine(self, machine: "Machine"):
-        if machine.name in self.machines and self.machines[machine.name].key() != machine.key():
+    def add_machine(self, machine: "MachineCtx"):
+        if machine.name in self.machines and self.machines[machine.name].machine != machine.machine:
             raise DuplicatedNameError(f"machine name {machine.name!r} is already used")
         self.machines[machine.name] = machine
     
-    def find_machine(self, machine: "Machine") -> Optional["Machine"]:
-        return next((machines_ for machines_ in self.machines.values() if machines_.key() == machine.key()), None)
+    def find_machine(self, machine: "MachineCtx") -> Optional["MachineCtx"]:
+        return next((machines_ for machines_ in self.machines.values() if machines_.machine == machine.machine), None)
 
-    def push_group(self, ns: Tuple[str, ...] = (), is_private: bool = False, default_machine: Optional["Machine"] = None):
+    def push_group(self, ns: Tuple[str, ...] = (), is_private: bool = False, default_machine: Optional["MachineCtx"] = None):
         self.scopes.append(Scope(ns, is_private, default_machine))
 
     def pop_group(self):
@@ -158,7 +156,7 @@ class Ctx:
     def load_param(self, param: JSONWithOnlyLink):
         self._set_param(param, self.default_machine, True)
 
-    def _set_param(self, param: Union[JSONWithPath, JSONWithOnlyLink], machine: "Machine", is_load: bool):
+    def _set_param(self, param: Union[JSONWithPath, JSONWithOnlyLink], machine: "MachineCtx", is_load: bool):
         if not isinstance(param, dict):
             raise TypeError("param should be a dictionary")
 
@@ -281,7 +279,7 @@ class Include:
     args: Dict[str, Any]
     ns: Tuple[str, ...] = ()
     clear_params: bool = False
-    machine: Optional["Machine"] = None
+    machine: Optional["MachineCtx"] = None
     env: Dict[str, str] = field(default_factory=lambda: {})
     remap: Dict[str, str] = field(default_factory=lambda: {})
 
@@ -347,7 +345,7 @@ class Node:
     ns: Tuple[str, ...] = ()
     env: Dict[str, str] = field(default_factory=lambda: {})
     remap: Dict[str, str] = field(default_factory=lambda: {})
-    machine: Optional["Machine"] = None
+    machine: Optional["MachineCtx"] = None
     has_logger: bool = False
 
     _used: bool = False
@@ -430,15 +428,9 @@ class SchemeParseError(Exception):
         return f"invalid {self.scheme} scheme url: {self.url}" + (f"\nformat: {self.format}" if self.format else "")
 
 @dataclass
-class Machine:
+class MachineCtx:
     name: str
-    address: str
-    env_loader: str = ""
-    user: str = ""
-    password: str = ""
-
-    def key(self):
-        return (self.address, self.user, self.password, self.env_loader)
+    machine: Machine
 
     def __enter__(self):
         ctx().push_group((), False, self)
@@ -448,63 +440,23 @@ class Machine:
         ctx().pop_group()
 
     @staticmethod
-    def parse(url: str) -> "Machine":
+    def parse(url: str) -> "MachineCtx":
         """
         parse machine scheme url
-        format: machine://user:pswd@addr/path/to/env_loader.sh
+        format: machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2
         """
-        parse_result = urllib.parse.urlparse(url, scheme="machine")
-        if parse_result.scheme != "machine":
-            raise SchemeParseError("machine", url, "machine://user:pswd@addr/path/to/env_loader.sh")
-
-        user = urllib.parse.unquote(parse_result.username or "")
-        password = urllib.parse.unquote(parse_result.password or "")
-        address = parse_result.hostname or ""
-        env_loader = urllib.parse.unquote(parse_result.path)
-
-        return Machine(name="", user=user, password=password, address=address, env_loader=env_loader)
-
-    def get_netloc(self) -> str:
-        netloc = self.address
-        if self.user:
-            auth = urlquote(self.user, unsafe="%@:")
-            if self.password:
-                auth += ":" + urlquote(self.password, unsafe="%@:")
-            netloc = auth + "@" + netloc
-        return netloc
+        return MachineCtx(name="", machine=Machine.parse(url))
 
     def __str__(self) -> str:
-        path = urlquote(self.env_loader, unsafe="%;#?")
-        return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", "", ""))
-
-    def is_loopback(self) -> bool:
-        if not self.address:
-            return True
-
-        # Direct IP address
-        try:
-            return ipaddress.ip_address(self.address).is_loopback
-        except ValueError:
-            pass
-
-        # Hostname: resolve all addresses
-        try:
-            infos = socket.getaddrinfo(self.address, None)
-        except socket.gaierror:
-            return False
-
-        return any(
-            ipaddress.ip_address(addr[0]).is_loopback
-            for _family, _, _, _, addr in infos
-        )
+        return str(self.machine)
 
     def to_xml(self, default: bool = False) -> ET.Element:
         attrs: Dict[str, str] = {}
         attrs["name"] = self.name
-        attrs["address"] = self.address
-        if self.env_loader:  attrs["env-loader"] = self.env_loader
-        if self.user:        attrs["user"] = self.user
-        if self.password:    attrs["password"] = self.password
+        attrs["address"] = self.machine.address
+        if self.machine.env_loader:  attrs["env-loader"] = shlex.join(self.machine.env_loader)
+        if self.machine.user:        attrs["user"] = self.machine.user
+        if self.machine.password:    attrs["password"] = self.machine.password
         attrs["default"] = "true" if default else "false"
         el = ET.Element("machine", attrs)
         return el
@@ -690,15 +642,15 @@ def group(ns: str = "") -> Group:
         raise ValueError(f"group ns should be relative path, got: {ns}")
     return Group(ns=_split_ns(ns))
 
-def machine(url: str = "", *, name: str = "", address: str = "", env_loader: str = "", user: str = "", password: str = "") -> Machine:
+def machine(url: str = "", *, name: str = "", address: str = "", env_loader: Sequence[str] = (), user: str = "", password: str = "") -> MachineCtx:
     if url:
-        machine = Machine.parse(url)
+        machine = MachineCtx.parse(url)
     else:
-        machine = Machine(name=name, address=address, env_loader=env_loader, user=user, password=password)
+        machine = MachineCtx(name=name, machine=Machine(address=address, env_loader=tuple(env_loader), user=user, password=password))
     if not machine.name:
         machine_ = ctx().find_machine(machine)
         if machine_ is None:
-            machine.name = anon(sanitize_identifier(machine.user + "_" + machine.address))
+            machine.name = anon(sanitize_identifier(machine.machine.user + "_" + machine.machine.address))
         else:
             machine.name = machine_.name
     return machine
@@ -801,9 +753,9 @@ def check_foreign_sync_resources(ctx: Ctx):
             # strip until index element
             if isinstance(value, (monoparam.Include, monoparam.Resource)):
                 runtime_machine = dict(value.context).get("runtime_machine")
-                runtime_machine_key = Machine.parse(runtime_machine).key() if runtime_machine is not None else None
+                runtime_machine_key = MachineCtx.parse(runtime_machine).machine if runtime_machine is not None else None
                 host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and FieldPath((*node.ns, node.name)).is_prefix(path)), None)
-                host_machine_key = host_node.machine.key() if host_node is not None and host_node.machine is not None else None
+                host_machine_key = host_node.machine.machine if host_node is not None and host_node.machine is not None else None
                 if host_machine_key != runtime_machine_key:
                     resource_name = f"!include {value.link}" if isinstance(value, monoparam.Include) else value.uri
                     runtime_machine_name = runtime_machine or ""
