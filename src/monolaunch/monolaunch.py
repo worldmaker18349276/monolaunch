@@ -102,6 +102,7 @@ class Ctx:
     machines: Dict[str, "MachineCtx"] = field(default_factory=lambda: {})
     params_filepath: Path = field(default_factory=lambda: Path(".yaml"))
     master: Optional["Master"] = None
+    need_regen: bool = True
 
     @property
     def pns(self) -> Tuple[str, ...]:
@@ -477,13 +478,20 @@ class SchemeParseError(Exception):
     def __str__(self):
         return f"invalid {self.scheme} scheme url: {self.url}" + (f"\nformat: {self.format}" if self.format else "")
 
+class _Regenerate(BaseException):
+    def __init__(self, machine: Machine):
+        self.machine = machine
+
 @dataclass
 class MachineCtx:
     name: str
     machine: Machine
 
     def __enter__(self):
+        need_regen = ctx().need_regen and not ctx().scopes
         ctx().push_group((), False, self)
+        if need_regen:
+            raise _Regenerate(ctx().default_machine.machine)
         return self
 
     def __exit__(self, *_):
@@ -826,24 +834,20 @@ def check_foreign_sync_resources(ctx: Ctx):
                         host_node_name = f"node {_join_ns((*host_node.ns, host_node.name))}"
                     warnings.warn(ForeignSyncResourceWarning(resource_name, runtime_machine_name, host_node_name, host_machine_name))
 
-def generate(launch_func: Callable[[], None]) -> Path:
+def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
     with _with_ctx():
+        ctx().need_regen = need_regen
         cwd = Path.cwd()
         name = launch_func.__name__
         ctx().params_filepath = cwd / f"{name}.yaml"
 
-        launch_func()
-
-        # TODO: user responsibility: `with node(type="param_loader.py", ...)`
-        # # add param loader
-        # if use_param_loader:
-        #     param_loader_node = Node(
-        #         name="param_loader", pkg="monolaunch", type="param_loader.py",
-        #         respawn=True, respawn_delay=3.0, clear_params=True,
-        #         machine=ctx().machines.get("local", DEFAULT_LOCAL_MACHINE),
-        #     )
-        #     with param_loader_node:
-        #         pass
+        try:
+            launch_func()
+        except _Regenerate:
+            if not need_regen:
+                raise RuntimeError("WTF!?")
+            else:
+                raise
 
         # save param
         # TODO: add option to embed param into launch file (how?)
@@ -911,22 +915,30 @@ def run(launch_func: Callable[[], None]) -> Any:
     )
     argparser.add_argument("--dry-run", action="store_true", help="generate launch file only")
     argparser.add_argument("--with-roscore", action="store_true", help="launch remote roscore")
+    argparser.add_argument("--no-regen-with-local-env-loader", action="store_true")
     args, unknown = argparser.parse_known_args()
-    sys.argv[1:] = unknown
     with_roscore = bool(args.with_roscore)
     dry_run = bool(args.dry_run)
+    need_regen = not bool(args.no_regen_with_local_env_loader)
     
     try:
-        launch_filepath = generate(launch_func=launch_func)
+        launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
     except Exception:
         traceback.print_exc()
         exit(1)
+    except _Regenerate as regen:
+        cmd = sys.argv[:]
+        cmd[0] = str(Path(cmd[0]).resolve())
+        cmd[1:1] = ["--no-regen-with-local-env-loader"]
+        cmd = regen.machine.command(cmd)
+        print("regenerate launch file with local env-loader:\n" + shlex.join(cmd))
+        os.execvp(cmd[0], cmd)
 
-    cmd = ["roslaunch", str(launch_filepath), *sys.argv[1:]]
+    cmd = ["roslaunch", str(launch_filepath), *unknown]
     if with_roscore:
         cmd = ["rosrun", "monolaunch", "with_roscore.py", *cmd]
     if dry_run:
-        print(shlex.join(cmd))
+        print("will not execute because dry-run is set:\n" + shlex.join(cmd))
         return
     os.execvp(cmd[0], cmd)
 
