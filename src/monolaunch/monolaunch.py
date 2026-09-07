@@ -74,6 +74,13 @@ class LoopRemapError(Exception):
 class LocalMachineWithEnvLoaderWarning(Warning):
     pass
 
+class LocalMachineNotLocalError(Warning):
+    pass
+
+class NoTopLevelScopeError(Warning):
+    def __str__(self):
+        return "please put `with machine(..., name='local')` at the top scope"
+
 LoggerConfig = Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]]
 
 @dataclass
@@ -92,12 +99,9 @@ class Ctx:
     param_node: Optional[SourcedNode] = None
     # node_name -> node, include_index -> include
     nodes: Dict[Union[str, int], Union["Node", "Include"]] = field(default_factory=lambda: {})
-    machines: Dict[str, "MachineCtx"] = field(default_factory=lambda: {"local": MachineCtx(name="local", machine=Machine(address="localhost"))})
+    machines: Dict[str, "MachineCtx"] = field(default_factory=lambda: {})
     params_filepath: Path = field(default_factory=lambda: Path(".yaml"))
     master: Optional["Master"] = None
-
-    def __post_init__(self):
-        self.scopes.append(Scope(default_machine=self.local_machine))
 
     @property
     def pns(self) -> Tuple[str, ...]:
@@ -109,15 +113,15 @@ class Ctx:
         return tuple(x for scope in scopes for x in scope.ns if x)
 
     @property
-    def local_machine(self) -> "MachineCtx":
-        return self.machines["local"]
-
-    @property
     def default_machine(self) -> "MachineCtx":
+        if not self.scopes:
+            raise NoTopLevelScopeError()
         return next(scope.default_machine for scope in self.scopes[::-1] if scope.default_machine)
 
     @default_machine.setter
     def default_machine(self, default_machine: "MachineCtx"):
+        if not self.scopes:
+            raise NoTopLevelScopeError()
         self.scopes[-1].default_machine = default_machine
 
     def add_node(self, ns: Tuple[str, ...], node: "Node"):
@@ -132,16 +136,24 @@ class Ctx:
         self.nodes[id(include)] = include
 
     def add_machine(self, machine: "MachineCtx"):
+        if machine.name in self.machines and self.machines[machine.name] == machine:
+            return
         if machine.name in self.machines and not self.find_machine(machine.machine):
             raise DuplicatedNameError(f"machine name {machine.name!r} is already used")
-        if machine.machine.is_local() and machine.machine.env_loader:
+        if machine.name not in self.machines and machine.machine.is_local() and machine.machine.env_loader:
             warnings.warn(LocalMachineWithEnvLoaderWarning(f"machine {machine.name} is local but env-loader is given"))
+        if machine.name == "local" and not machine.machine.is_local():
+            raise LocalMachineNotLocalError(f"machine with name 'local' must be local machine, got: {machine.machine}")
         self.machines[machine.name] = machine
     
     def find_machine(self, machine: Machine) -> Optional["MachineCtx"]:
         return next((machines_ for machines_ in self.machines.values() if machines_.machine == machine), None)
 
     def push_group(self, ns: Tuple[str, ...] = (), is_private: bool = False, default_machine: Optional["MachineCtx"] = None):
+        if not self.scopes and (default_machine is None or default_machine.name != "local"):
+            raise NoTopLevelScopeError()
+        if not self.scopes and default_machine and default_machine.name == "local":
+            self.add_machine(default_machine)
         self.scopes.append(Scope(ns, is_private, default_machine))
 
     def pop_group(self):
@@ -156,7 +168,7 @@ class Ctx:
 
     @property
     def is_private(self) -> bool:
-        return self.scopes[-1].is_private
+        return bool(self.scopes) and self.scopes[-1].is_private
 
     # param
     def set_param(self, param: JSONWithPath):
@@ -234,6 +246,8 @@ class Ctx:
         return remap
 
     def push_remap(self, mapping: Dict[str, str]):
+        if not self.scopes:
+            raise NoTopLevelScopeError()
         remap = self.scopes[-1].remap
         for k, v in mapping.items():
             k_ = self.resolve_name(k)
@@ -252,6 +266,8 @@ class Ctx:
 
     # env
     def push_env(self, envvars: Dict[str, str]):
+        if not self.scopes:
+            raise NoTopLevelScopeError()
         self.scopes[-1].env.update(envvars)
 
     def get_env(self) -> Dict[str, str]:
@@ -262,12 +278,18 @@ class Ctx:
 
     # logger
     def load_logger(self, link: Link):
+        if not self.scopes:
+            raise NoTopLevelScopeError()
         self.scopes[-1].logger.append(link)
 
     def set_logger(self, config: LoggerConfig):
+        if not self.scopes:
+            raise NoTopLevelScopeError()
         self.scopes[-1].logger.append(config)
 
     def assign_logger(self) -> bool:
+        if not self.scopes:
+            raise NoTopLevelScopeError()
         configs = [config for scope in self.scopes for config in scope.logger]
         if not configs: return False
         
@@ -804,7 +826,7 @@ def check_foreign_sync_resources(ctx: Ctx):
                         host_node_name = f"node {_join_ns((*host_node.ns, host_node.name))}"
                     warnings.warn(ForeignSyncResourceWarning(resource_name, runtime_machine_name, host_node_name, host_machine_name))
 
-def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
+def generate(launch_func: Callable[[], None]) -> Path:
     with _with_ctx():
         cwd = Path.cwd()
         name = launch_func.__name__
@@ -812,26 +834,26 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
 
         launch_func()
 
-        # add param loader
-        if use_param_loader:
-            param_loader_node = Node(
-                name="param_loader", pkg="monolaunch", type="param_loader.py",
-                respawn=True, respawn_delay=3.0, clear_params=True,
-                machine=ctx().local_machine,
-            )
-            with param_loader_node:
-                pass
+        # TODO: user responsibility: `with node(type="param_loader.py", ...)`
+        # # add param loader
+        # if use_param_loader:
+        #     param_loader_node = Node(
+        #         name="param_loader", pkg="monolaunch", type="param_loader.py",
+        #         respawn=True, respawn_delay=3.0, clear_params=True,
+        #         machine=ctx().machines.get("local", DEFAULT_LOCAL_MACHINE),
+        #     )
+        #     with param_loader_node:
+        #         pass
 
         # save param
         # TODO: add option to embed param into launch file (how?)
         param_node = ctx().param_node
         check_foreign_sync_resources(ctx())
-        if param_node is not None or use_param_loader:
-            if param_node is None:
-                param_node = ctx().param_loader.new(ctx().params_filepath)
-                assert param_node is not None
-            with open(ctx().params_filepath, "w") as f:
-                yaml.dump(param_node.sources[0].data, f, Dumper=SourcedYAMLDumper, sort_keys=False)
+        if param_node is None:
+            param_node = ctx().param_loader.new(ctx().params_filepath)
+            assert param_node is not None
+        with open(ctx().params_filepath, "w") as f:
+            yaml.dump(param_node.sources[0].data, f, Dumper=SourcedYAMLDumper, sort_keys=False)
 
 
         launch_el = ET.Element("launch")
@@ -846,8 +868,7 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
             launch_el.append(ET.Element("arg", dict(name="resolved_param", default="$(eval eval(resolved_param_expr))")))
 
         # add <rosparam>
-        if param_node is not None or use_param_loader:
-            launch_el.append(ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)")))
+        launch_el.append(ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)")))
 
         # add resource loader
         sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param + '#/$sync_resources')"
@@ -878,9 +899,11 @@ def generate(launch_func: Any, use_param_loader: bool = True) -> Path:
 
         return launch_filepath
 
-def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
-    if launch_func is None:
-        return lambda launch_func: run(launch_func, use_param_loader=use_param_loader) # type: ignore
+# TODO: rename to launch
+def run(launch_func: Callable[[], None]) -> Any:
+    if launch_func.__globals__["__name__"] != "__main__":
+        return launch_func
+    # only run on main
 
     argparser = argparse.ArgumentParser(
         add_help=False,
@@ -894,7 +917,7 @@ def run(launch_func: Any = None, *, use_param_loader: bool = True) -> Any:
     dry_run = bool(args.dry_run)
     
     try:
-        launch_filepath = generate(launch_func=launch_func, use_param_loader=use_param_loader)
+        launch_filepath = generate(launch_func=launch_func)
     except Exception:
         traceback.print_exc()
         exit(1)
