@@ -469,7 +469,11 @@ def load_YAML(link: Link) -> JSON:
     """
     with open(link.filepath, 'r') as f:
         data = yaml.load(f, Loader=SimpleYAMLLoader)
-    return link.fieldpath.walk(data)
+    try:
+        return link.fieldpath.walk(data)
+    except FieldAccessError as e:
+        e.obj = str(link.filepath)
+        raise e
 
 
 class ExYAMLLoader(SimpleYAMLLoader):
