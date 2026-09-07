@@ -4,6 +4,7 @@ sync resources before launch, so that resources can be managed in single place.
 it uses commands: ssh, sshpass, rsync
 """
 from inspect import cleandoc
+import sys
 import re
 import shlex
 import subprocess
@@ -11,9 +12,9 @@ import dataclasses
 from pathlib import Path
 import socket
 
-from typing import Sequence, Tuple
+from typing import List, Sequence, Tuple
 import urllib.parse
-from monolaunch.yaml_utils import assert_JSON, Link, load_YAML
+from monolaunch.yaml_utils import FieldAccessError, assert_JSON, Link, load_YAML
 
 # TODO: typecheck user input
 
@@ -58,14 +59,13 @@ class Machine:
         user = urllib.parse.unquote(parse_result.username or "")
         password = urllib.parse.unquote(parse_result.password or "")
         address = parse_result.hostname or "localhost"
-        env_loader_args = urllib.parse.unquote(parse_result.path)
-        if env_loader_args:
-            cmd, args_ = (*env_loader_args.rsplit("?", 1), "")[:2]
-            args_ = urllib.parse.parse_qsl(args_)
-            args = tuple(v for k, v in args_ if k == "arg")
-            env_loader = (cmd, *args)
+        env_loader_cmd = urllib.parse.unquote(parse_result.path)
+        if env_loader_cmd:
+            query = urllib.parse.parse_qsl(parse_result.query)
+            env_loader_args = tuple(v for k, v in query if k == "arg")
+            env_loader = (env_loader_cmd, *env_loader_args)
         
-            if ("", "setup") in args_:
+            if ("", "setup") in query:
                 if IP_REGEX.match(address):
                     setenv = shlex.quote(f"ROS_IP={address}")
                 else:
@@ -97,12 +97,10 @@ class Machine:
         return netloc
 
     def __str__(self) -> str:
-        cmd, *args = self.env_loader
+        cmd, *args = self.env_loader or ("",)
         path = urlquote(cmd, unsafe="%;#?")
         args = urllib.parse.urlencode([("arg", arg) for arg in args])
-        if args or "?" in path:
-            path += "?" + args
-        return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", "", ""))
+        return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", args, ""))
 
     def is_local(self):
         # see: https://github.com/ros/ros_comm/blob/noetic-devel/tools/roslaunch/src/roslaunch/core.py#L86
@@ -124,19 +122,17 @@ class Machine:
         return is_local
 
     def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True) -> Tuple[str, ...]:
-        password_args = ["sshpass", "-p", self.password] if self.password else []
-        is_local = self.address == "localhost" and self.user == ""
-        remote_args = ["ssh", f"{self.user}@{self.address}" if self.user else self.address] if not is_local else ["bash", "-c"]
         if with_env_loader and self.env_loader:
             remote_cmd = (*self.env_loader, *remote_cmd)
-        return (
-            *password_args,
-            *remote_args,
-            shlex.join(remote_cmd),
-        )
+        if self.is_local():
+            return tuple(remote_cmd)
+        password_args = ["sshpass", "-p", self.password] if self.password else []
+        remote_args = ["ssh", f"{self.user}@{self.address}" if self.user else self.address]
+        return (*password_args, *remote_args, shlex.join(remote_cmd))
 
 # TODO: ban unset
 # TODO: prevent bad path
+# TODO: expandvars with nounset
 def expandvars(path: str) -> str:
     import os
     os.environ['DOLLARSIGN'] = '$'
@@ -155,7 +151,7 @@ def remote_expandvars(machine: Machine, path: str) -> str:
         ])
     ])
 
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True)
     return result.stdout
 
 
@@ -190,6 +186,47 @@ def rsync(source: str, destination: str, machine: Machine, check_only: bool):
             source, destination_,
         ], check=True)
 
+@dataclasses.dataclass(frozen=True)
+class SyncInfo:
+    source: str       # /path/to/source (can contain ${ENVVAR})
+    destination: str  # ${ROS_HOME}/resources/sync/path/to/source
+    machine: str      # machine://usr:pswd@host/path/to/env_loader.sh (empty -> local)
+    check_only: bool
+
+    @staticmethod
+    def load_list(params_link: Link) -> List["SyncInfo"]:
+        try:
+            params = assert_JSON(load_YAML(params_link))
+        except FieldAccessError as e:
+            print(e, file=sys.stderr)
+            params = []
+
+        res: List[SyncInfo] = []
+        if not isinstance(params, list):
+            raise TypeError(f"{params_link} is not seq")
+        for i, resource in enumerate(params):
+            curr_link = params_link.append(i)
+            if not isinstance(resource, dict):
+                raise TypeError(f"{curr_link} is not map")
+            
+            machine = resource.get("machine")
+            if not isinstance(machine, str):
+                raise TypeError(f"{curr_link}/machine is not str")
+            
+            source = resource.get("source")
+            if not isinstance(source, str):
+                raise TypeError(f"{curr_link}/source is not str")
+            
+            destination = resource.get("destination")
+            if not isinstance(destination, str):
+                raise TypeError(f"{curr_link}/destination is not str")
+
+            check_only = bool(resource.get("check_only", False))
+            
+            res.append(SyncInfo(machine=machine, source=source, destination=destination, check_only=check_only))
+        
+        return res
+
 def sync(params_link: str):
     """
     load resources to given paths under remote machines.
@@ -203,43 +240,18 @@ def sync(params_link: str):
     ```
     """
     print(f"sync resources: {params_link}")
-    params_link_ = Link.parse(params_link)
-    params = assert_JSON(load_YAML(params_link_))
-    if not isinstance(params, list):
-        raise TypeError(f"{params_link_} is not seq")
-    for i, resource in enumerate(params):
-        curr_link = params_link_.append(i)
-        if not isinstance(resource, dict):
-            raise TypeError(f"{curr_link} is not map")
-        
-        param_machine = resource.get("machine")
-        if not isinstance(param_machine, str):
-            raise TypeError(f"{curr_link}/machine is not str")
-        
-        source = resource.get("source")
-        if not isinstance(source, str):
-            raise TypeError(f"{curr_link}/source is not str")
-        
-        destination = resource.get("destination")
-        if not isinstance(destination, str):
-            raise TypeError(f"{curr_link}/destination is not str")
-        
-        check_only = bool(resource.get("check_only", False))
-        
-        machine = Machine.parse(param_machine)
+    for info in SyncInfo.load_list(Link.parse(params_link)):
+        machine = Machine.parse(info.machine)
         machine = machine.reduce_local()
 
-        expanded_source = expandvars(source)
-        expanded_destination = remote_expandvars(machine, destination)
+        expanded_source = expandvars(info.source)
+        expanded_destination = remote_expandvars(machine, info.destination)
         print(f"rsync {expanded_source} -> {expanded_destination}")
-        rsync(expanded_source, expanded_destination, machine, check_only)
-
-    return True
+        rsync(expanded_source, expanded_destination, machine, info.check_only)
 
 __all__ = ["sync"]
 
 if __name__ == "__main__":
-    import sys
     if len(sys.argv) != 2:
         print("usage: python -m monolaunch.monoresource <param link>\n" + cleandoc(sync.__doc__ or ""), file=sys.stderr)
         exit(1)
