@@ -382,16 +382,8 @@ class Node:
         self.remap = ctx().get_remap()
         self.has_logger = ctx().assign_logger()
         if self.has_logger:
-            self.launch_prefix = self._logger_prefix() + self.launch_prefix
+            self.launch_prefix = ("rosrun", "monolaunch", "setup_logger.py") + self.launch_prefix
         ctx().pop_group()
-
-    def _logger_prefix(self):
-        return (
-            "rosrun",
-            "monolaunch",
-            "setup_logger.py",
-            _join_ns(self.ns + (self.name, "$ros_logger_config")),
-        )
 
     def to_xml(self) -> ET.Element:
         attrs: Dict[str, str] = {}
