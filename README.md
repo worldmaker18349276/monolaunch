@@ -41,74 +41,6 @@ Params are hoisted to the top of the generated file.
 | set_logger({"logger_name": "INFO"}) | set logger config directly                                             |
 | with master()                       | borrow removed `<master>` tag, for launching roscore remotely          |
 
-### Machine
-the original machanism of `<machine default="true">` simply sets to default globally,
-regardless of which scope/namespace/include it is located in
-(see: https://github.com/ros/ros_comm/issues/1884).
-
-in monolaunch, you can use `with machine(...)` to set default machine **in this scope**.
-to specify the machine the node run on, just use it as context manager:
-```python
-with remote_machine:
-    with node(name="remote_node"):
-        pass
-```
-just like `<machine>` tag, you can call `machine(...)` with explicit arguments (user, password, address, env_loader),
-or use machine scheme url, which is in the form: `machine://usr:psd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2`.
-
-there are three roles for launching nodes on multiple machines: launcher, worker and master.
-they can locate in different machines, and require some environmental setups:
-- launcher:
-  `ROS_MASTER_URI` should be set, and it will be passed to the node process.
-  `ROS_IP` should be set, that is for launch server.
-- worker:
-  `ROS_IP` should be set, which is for advertising topics.
-  it should be setup by env_loader from roslaunch.
-- master:
-  `ROS_IP` should be set, which is for running roscore.
-  it must match the address of `ROS_MASTER_URI`.
-
-if `ROS_HOSTNAME` is set (by default, ros uses its own machine name as hostname)
-or `ROS_MASTER_URI` uses hostname (by default, ros uses its own machine name as hostname),
-it is needed to setup `/etc/hosts` for all machines, so that they can find each other.
-the benefit of using `ROS_HOSTNAME` is that it is more robust to network changes.
-one can configure SSH keys for each workers in launcher's machine,
-so that no plain-text password is needed to provide to roslaunch.
-
-for two nodes with remote machine tags which only differ from env-loader,
-they will be prefixed with coorresponding env-loader.
-however, when the user and address of machine of a node is equivalent to localhost,
-it will be executed directly without prefixing with env-loader.
-monolaunch will warn on this case.
-
-by default, roslaunch will start roscore automatically if roscore isn't open,
-but if ros master is configured as remote machine, roslaunch will wait for it.
-this inconsistency has not been resolved because it is a bad practice.
-it is recommended to run roscore by yourself instead of relying on roslaunch.
-I think running roscore alongside with roslaunch is better than keeping roscore up,
-later one make previous parameters interfere with next run, causing awkward bugs.
-it would be convenient if it can launch roscore remotely,
-so we add master node to the launcher:
-```python
-with master_machine:
-    with master(): # roscore will be launched at master_machine
-        pass
-```
-it will be translated into `<master machine="..."/>`,
-which is removed tag and will be skipped by roslaunch.
-it is impossible to launch roscore as a node inside roslaunch,
-you need to prefix `roslaunch` command with `with_roscore.py`,
-which will parse master tag and launch roscore remotely.
-it is off by default for calling `run(launch_func)`,
-and can be turned on by `--with-roscore`.
-
-to launch nodes remotely, one should setup `ROS_IP` and env-loader script on remote machine.
-and `/etc/hosts` should also be configured if `ROS_HOSTNAME` is used.
-the configuration files are scattered across multiple machines, which is inconvenient.
-luckly, env-loader scripts can be replaced by treat: `bash -c '...' --`.
-we wrap it into simplified machine scheme url, just use: `machine://usr@addr/path/to/devel/setup.bash?=setup`.
-on the worker machine, all you need to do is keep the builds in sync.
-most of network settings can be configured on the launcher machine.
 
 ### Remap
 the original mechanism of `<remap>` is:
@@ -293,6 +225,14 @@ we actually do not set/load param via rosparam command,
 but aggregate them into a single param file using !include and !merge,
 them resolve it before launch.
 
+source yaml files, resolved yaml file and ros parameter server can be synchronized dynamically.
+to use this function, user need to launch param_loader on launcher machine:
+```python
+with node(pkg="monolaunch", type="param_loader.py", ...):
+    pass
+```
+
+
 ### Logger
 ros logging system of ROS compose of two parts: rosout mechanism and language specific API.
 
@@ -335,6 +275,106 @@ ros.planner.sub: DEBUG
 rosout.controller: DEBUG
 ```
 we will generate config files for each node and configure environment variables.
+
+
+### Machine
+the original machanism of `<machine default="true">` simply sets to default globally,
+regardless of which scope/namespace/include it is located in
+(see: https://github.com/ros/ros_comm/issues/1884).
+
+in monolaunch, you can use `with machine(...)` to set default machine **in this scope**.
+to specify the machine the node run on, just use it as context manager:
+```python
+with remote_machine:
+    with node(name="remote_node"):
+        pass
+```
+just like `<machine>` tag, you can call `machine(...)` with explicit arguments (user, password, address, env_loader),
+or use machine scheme url, which is in the form: `machine://usr:psd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2`.
+
+there are three roles for launching nodes on multiple machines: launcher, worker and master.
+they can locate in different machines, and require some environmental setups:
+- launcher:
+  `ROS_MASTER_URI` should be set, and it will be passed to the node process.
+  `ROS_IP` should be set, that is for launch server.
+- worker:
+  `ROS_IP` should be set, which is for advertising topics.
+  it should be setup by env_loader, invoked by roslaunch.
+- master:
+  `ROS_IP` should be set, which is for running roscore.
+  it must match the address of `ROS_MASTER_URI`.
+
+if `ROS_IP` is not set (`ROS_HOSNAME` will be used then) or `ROS_MASTER_URI` uses hostname,
+it is needed to setup `/etc/hosts` for all machines, so that they can find each other.
+the benefit of using `ROS_HOSTNAME` is that it is more robust to network changes.
+one can configure SSH keys for each workers in launcher's machine,
+so that no plain-text password is needed to provide to roslaunch.
+
+#### worker
+
+to launch nodes remotely, one should write env-loader script on remote machine,
+which usually do: source setup script, setup `ROS_IP`.
+in the launch file, the env-loader attribute of corresponding machine tag is basically the absolute path to this file.
+the network configurations (`ROS_IP`) are scattered across multiple machines, which is inconvenient.
+luckly, env-loader scripts can be replaced by the treat: `bash -c '...' --`.
+we provide a simplified machine scheme url to solve this problem: `machine://usr@addr/path/to/devel/setup.bash?=setup`,
+where env-loader will be expanded to an inline bash script that source `/path/to/devel/setup.bash` and setup `ROS_IP`.
+on the worker machine, all you need to do is keep the builds in sync.
+
+#### master
+
+by default, roslaunch will start roscore automatically if roscore isn't open,
+but if ros master uri refer to remote machine, roslaunch will wait for roscore.
+it is recommended to run roscore by yourself instead of relying on roslaunch.
+I think running roscore alongside with roslaunch is better than keeping roscore up,
+later one make previous parameters interfere with next run, causing awkward bugs.
+it would be convenient if it can launch roscore remotely,
+so we add master node to the launcher:
+```python
+with master_machine:
+    with master(): # roscore will be launched at master_machine
+        pass
+```
+it will be translated into `<master machine="..."/>`,
+which is a removed tag and will be skipped by roslaunch.
+it is impossible (really?) to launch roscore as a node from roslaunch itself,
+you need to prefix `roslaunch` command with `with_roscore.py`,
+which will parse master tag and launch roscore remotely.
+it is off by default and can be turned on by `--with-roscore`.
+
+#### launcher
+
+for two nodes with remote machine tags which only differ from env-loader,
+they will be prefixed with coorresponding env-loader.
+however, when the user and address of the machine of a node is equivalent to current user and localhost,
+it will be executed directly without prefixing with env-loader,
+otherwise it may cause some weird bugs due to the difference between composing commands and running commands.
+thus, monolaunch will warn on this case.
+
+the awkward part is, we have to configure `ROS_IP`, `ROS_MASTER_URI` for launcher and local nodes,
+env-loader of machine scheme uri for local nodes just doesn't work.
+the best way is let launch file configure its machine setting inside itself, that is,
+parse desired machine tag from the launch file, and use it to run the launch file itself.
+for the launch file generated by monolaunch, `with_roscore.py` will parse local and master machine
+and run roscore and roslaunch with correct env-loader.
+
+however, it also affects how we generate launch file:
+generating launch file and running launch file should also be in the same environment.
+the best way still is let launcher generator configure its machine setting inside itself,
+but now it is too complicated to parse.
+
+in monolaunch, you need to put the machine context manager named local at the top scope:
+```python
+with machine(..., name="local"): # its address must be local
+    ... # all nodes should be put under it
+```
+which indicates the machine setting of the launcher itself,
+when the code execute to this line at the first time,
+it will abort and run again with correct env-loader.
+user should not put any important operation before it.
+you don't need to setup network settings (`ROS_IP` and `ROS_MASTER_URI`) for running launcher script,
+they will be configured automatically according to the local machine you set.
+
 
 ## monoparam
 
