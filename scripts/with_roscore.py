@@ -48,10 +48,12 @@ def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Machine]:
 
 def main():
     command = sys.argv[1:]
-    if len(command) < 2 or command[0] != "roslaunch" or not command[1].endswith(".launch"):
-        raise ValueError("with_roscore.py must be prefixed before `roslaunch <launch_file.launch> ...`")
-    command[2:2] = ["--wait"] # force to wait my roscore
-    local, master = _get_local_and_master_machine(Path(command[1]))
+    if len(command) < 2 or not command[1].endswith(".launch"):
+        raise ValueError("[with_roscore] with_roscore.py must be prefixed before `roslaunch <launch_file.launch> ...`")
+    command[1:1] = ["--wait"] # force to wait my roscore
+    os.environ["NO_RELAUNCH_WITH_ROSCORE"] = '1'
+
+    local, master = _get_local_and_master_machine(Path(command[2]))
 
     ros_master_uri = f"http://{master.address}:11311"
     os.environ["ROS_MASTER_URI"] = ros_master_uri

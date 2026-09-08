@@ -829,6 +829,16 @@ def check_foreign_sync_resources(ctx: Ctx):
                         host_node_name = f"node {_join_ns((*host_node.ns, host_node.name))}"
                     warnings.warn(ForeignSyncResourceWarning(resource_name, runtime_machine_name, host_node_name, host_machine_name))
 
+AUTO_RELAUNCH_WITH_ROSCORE_EXPR = """
+(
+    not optenv('NO_RELAUNCH_WITH_ROSCORE', '')
+    and __import__('os').execv(
+        __import__('rospkg').RosPack().get_path('monolaunch') + '/scripts/with_roscore.py',
+        ['with_roscore.py', *__import__('sys').argv]
+    )
+)
+""".replace("\n", " ")
+
 def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
     with _with_ctx():
         ctx().need_regen = need_regen
@@ -856,6 +866,10 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
 
 
         launch_el = ET.Element("launch")
+
+        # add auto relaunch with roscore
+        launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_expr", default=AUTO_RELAUNCH_WITH_ROSCORE_EXPR)))
+        launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_res", default="$(eval eval(auto_relaunch_with_roscore_expr))")))
 
         # add initial param resolver
         if param_node:
@@ -906,39 +920,41 @@ def run(launch_func: Callable[[], None]) -> Any:
     if launch_func.__globals__["__name__"] != "__main__":
         return launch_func
     # only run on main
+    cmd = _run(launch_func)
+    if cmd is None:
+        exit(1)
+    elif cmd == ():
+        exit(0)
+    else:
+        os.execvp(cmd[0], cmd)
 
+def _run(launch_func: Callable[[], None]) -> Optional[Tuple[str, ...]]:
     argparser = argparse.ArgumentParser(
         add_help=False,
-        usage="%(prog)s [--dry-run] [--with-roscore] [ARGS ...]",
+        usage="%(prog)s [--dry-run] [ARGS ...]",
     )
     argparser.add_argument("--dry-run", action="store_true", help="generate launch file only")
-    argparser.add_argument("--with-roscore", action="store_true", help="launch remote roscore")
-    argparser.add_argument("--no-regen-with-local-env-loader", action="store_true")
     args, unknown = argparser.parse_known_args()
-    with_roscore = bool(args.with_roscore)
     dry_run = bool(args.dry_run)
-    need_regen = not bool(args.no_regen_with_local_env_loader)
+    need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
     cmd = sys.argv[:]
     
     try:
         launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
     except Exception:
         traceback.print_exc()
-        exit(1)
+        return None
     except _Regenerate as regen:
-        cmd[0] = str(Path(cmd[0]).resolve())
-        cmd[1:1] = ["--no-regen-with-local-env-loader"]
         cmd = regen.machine.command(cmd)
         print("regenerate launch file with local env-loader:\n" + shlex.join(cmd))
-        os.execvp(cmd[0], cmd)
+        os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
+        return cmd
 
-    cmd = ["roslaunch", str(launch_filepath), *unknown]
-    if with_roscore:
-        cmd = ["rosrun", "monolaunch", "with_roscore.py", *cmd]
+    cmd = ("roslaunch", str(launch_filepath), *unknown)
     if dry_run:
         print("will not execute because dry-run is set:\n" + shlex.join(cmd))
-        return
-    os.execvp(cmd[0], cmd)
+        return ()
+    return cmd
 
 def _indent(el: ET.Element, level: int = 0):
     indent = "\n" + "  " * level
