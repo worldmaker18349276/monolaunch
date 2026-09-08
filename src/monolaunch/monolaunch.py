@@ -71,9 +71,6 @@ class FilePathNotAbsoluteError(Exception):
 class LoopRemapError(Exception):
     pass
 
-class LocalMachineWithEnvLoaderWarning(Warning):
-    pass
-
 class LocalMachineNotLocalError(Warning):
     pass
 
@@ -141,8 +138,6 @@ class Ctx:
             return
         if machine.name in self.machines and not self.find_machine(machine.machine):
             raise DuplicatedNameError(f"machine name {machine.name!r} is already used")
-        if machine.name not in self.machines and machine.machine.is_local() and machine.machine.env_loader:
-            warnings.warn(LocalMachineWithEnvLoaderWarning(f"machine {machine.name} is local but env-loader is given"))
         if machine.name == "local" and not machine.machine.is_local():
             raise LocalMachineNotLocalError(f"machine with name 'local' must be local machine, got: {machine.machine}")
         self.machines[machine.name] = machine
@@ -871,6 +866,9 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
             launch_el.append(ET.Element("arg", dict(name="resolved_param_expr", default=resolved_param_expr)))
             launch_el.append(ET.Element("arg", dict(name="resolved_param", default="$(eval eval(resolved_param_expr))")))
 
+            # # DEBUG: resolve once
+            # monoparam.save_resolved(ctx().params_filepath)
+
         # add <rosparam>
         launch_el.append(ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)")))
 
@@ -920,6 +918,7 @@ def run(launch_func: Callable[[], None]) -> Any:
     with_roscore = bool(args.with_roscore)
     dry_run = bool(args.dry_run)
     need_regen = not bool(args.no_regen_with_local_env_loader)
+    cmd = sys.argv[:]
     
     try:
         launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
@@ -927,7 +926,6 @@ def run(launch_func: Callable[[], None]) -> Any:
         traceback.print_exc()
         exit(1)
     except _Regenerate as regen:
-        cmd = sys.argv[:]
         cmd[0] = str(Path(cmd[0]).resolve())
         cmd[1:1] = ["--no-regen-with-local-env-loader"]
         cmd = regen.machine.command(cmd)
