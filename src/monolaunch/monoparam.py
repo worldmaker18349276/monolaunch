@@ -1899,7 +1899,7 @@ class YAMLSynchronizer:
             status = status_
             time.sleep(dt)
 
-def save_resolved(source_path: Union[str, Path], skip_empty: bool = True, aggregate_sync_resources: bool = True) -> str:
+def to_resolved(source_path: Union[str, Path], skip_empty: bool = True, aggregate_sync_resources: bool = True) -> str:
     """
     resolve yaml file, save as {name}.resolved.yaml, returns resolved yaml file path.
 
@@ -1922,6 +1922,6 @@ def save_resolved(source_path: Union[str, Path], skip_empty: bool = True, aggreg
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("usage: python -m monolaunch.monoparam <source yaml file>\n" + cleandoc(save_resolved.__doc__ or ""), file=sys.stderr)
+        print("usage: python -m monolaunch.monoparam <source yaml file>\n" + cleandoc(to_resolved.__doc__ or ""), file=sys.stderr)
         exit(1)
-    save_resolved(sys.argv[1])
+    to_resolved(sys.argv[1])
