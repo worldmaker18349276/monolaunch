@@ -325,7 +325,7 @@ to launch nodes remotely, one should write env-loader script on remote machine,
 which usually do: source setup script, setup `ROS_IP`.
 in the launch file, the env-loader attribute of corresponding machine tag is basically the absolute path to this file.
 the network configurations (`ROS_IP`) are scattered across multiple machines, which is inconvenient.
-luckly, env-loader scripts can be replaced by the treat: `bash -c '...' --`.
+luckly, env-loader scripts can be replaced by the trick: `bash -c '...' --`.
 we provide a simplified machine scheme url to solve this problem: `machine://usr@addr/path/to/devel/setup.bash?=setup`,
 where env-loader will be expanded to an inline bash script that source `/path/to/devel/setup.bash` and setup `ROS_IP`.
 on the worker machine, all you need to do is keep the builds in sync.

@@ -23,7 +23,6 @@ and we prefer the syle:
 - block seq style always indent, so that it can be folded in editor
 
 we provide some tools for dealing with JSON object in deep.
-where we treat null as an empty slot.
 we also provide a simple resolver for !include and !merge tags:
 
 - `!include` imports another YAML file.
@@ -45,7 +44,6 @@ we also provide a simple resolver for !include and !merge tags:
     a: 1
     b: 2
   ```
-  the path of !include is relative to the current location (directory of the file contains this term)
 
 - `!merge` merges a list of mappings.
 
@@ -111,22 +109,31 @@ TaggedJSON = Union[None, JSONScalar, List["TaggedJSON"], Dict[str, "TaggedJSON"]
 
 
 def is_JSON(data: Any) -> bool:
+    """
+    check if an object is json, the type must match exactly, not just a subtype.
+    """
     if type(data) in (type(None), bool, int, float, str):
         return True
     elif type(data) == list:
-        return all(is_JSON(e) for e in data) # type: ignore
+        return all(is_JSON(e) for e in data) # pyright: ignore[reportUnknownVariableType]
     elif type(data) == dict:
-        return all(type(k) == str and is_JSON(v) for k, v in data.items()) # type: ignore
+        return all(type(k) == str and is_JSON(v) for k, v in data.items()) # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
     else:
         return False
 
 def assert_JSON(data: Any) -> JSON:
+    """
+    assert if an object is json, the type must match exactly, not just a subtype.
+    """
     if not is_JSON(data):
         raise TypeError(f"not json: {data}")
     return data
 
 
 def deep_copy(obj: JSON) -> JSON:
+    """
+    deep copy the whole json.
+    """
     if obj is None:
         return None
     if isinstance(obj, dict):
@@ -207,7 +214,7 @@ def _deep_merge(path: "FieldPath", base: JSON, update: JSON) -> Tuple[JSON, List
 
 def deep_merge(base: JSON, update: JSON) -> Tuple[JSON, List["FieldPath"]]:
     """
-    merge base by copying update, returns merged base and updated paths.
+    merge base by copying update, returns merged base and inconsistent paths.
     unlike deep_update, different values at the same field will not be overrided, and warnings will be raised.
     """
     return _deep_merge(FieldPath(), base, update)
@@ -251,7 +258,8 @@ def deep_eq(lhs: JSON, rhs: JSON) -> bool:
 def deep_diff(old: JSON, new: JSON) -> Dict["FieldPath", Optional[JSON]]:
     """
     diff in the scalar level.
-    keys are paths, values can be scalars for updating values, or maps/seqs for changing types, or None for deletion.
+    null is treated as empty slot.
+    returns map from paths to: scalars for updating values, or maps/seqs for changing types, or None for deletion.
     """
     updated: Dict[FieldPath, Optional[JSON]] = {}
 
@@ -326,16 +334,20 @@ class FieldPath:
     """
     a path for traversing nested map and seq.
     element can be str for accessing map, or int for accessing seq.
+    map keys must not contain '/' or '#'.
     """
     elements: Tuple[Union[int, str], ...] = field(default_factory=tuple)
 
     def __post_init__(self):
         for key in self.elements:
-            if isinstance(key, str) and "/" in key:
-                raise ValueError(f"element of FieldPath cannot contain '/': {key}")
+            if isinstance(key, str) and ("/" in key or "#" in key):
+                raise ValueError(f"element of FieldPath cannot contain '/' or '#': {key}")
 
     @staticmethod
     def parse(fieldpath: str) -> "FieldPath":
+        """
+        parse slashed-separated path into FieldPath.
+        """
         path: List[Union[int, str]] = []
         for e in fieldpath.strip("/").split("/"):
             if e:
@@ -375,15 +387,20 @@ class FieldPath:
         return longer.elements[:len(self.elements)] == self.elements
 
     # @raises(FieldAccessError)
-    def walk(self, node: JSON) -> JSON:
+    def walk(self, root: JSON) -> JSON:
+        """
+        traverse into nested map and seq according to this path, return the final value.
+        raises FieldAccessError if the path is invalid for the given node.
+        """
+        node = root
         for i, key in enumerate(self.elements):
             if isinstance(key, str):
                 if not isinstance(node, dict) or key not in node:
-                    raise FieldAccessError(self[:i+1], f"{type(node).__name__} object")
+                    raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
                 node = node[key]
             else:
                 if not isinstance(node, list) or key not in range(len(node)):
-                    raise FieldAccessError(self[:i+1], f"{type(node).__name__} object")
+                    raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
                 node = node[key]
         return node
 
@@ -440,14 +457,14 @@ class Link:
 
 class SimpleYAMLLoader(yaml.SafeLoader):
     """
-    load yaml format as json object: no complex key for maps, no alias.
+    loader for yaml format as json object: no complex key for maps, no alias.
     """
     def compose_node(self, parent: Optional[yaml.nodes.Node], index: int):
-        if self.check_event(yaml.AliasEvent): # type: ignore
+        if self.check_event(yaml.AliasEvent): # pyright: ignore[reportUnknownMemberType]
             raise yaml.YAMLError("Aliases are not allowed")
 
-        event = self.peek_event() # type: ignore
-        if getattr(event, "anchor", None) is not None: # type: ignore
+        event = self.peek_event() # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        if getattr(event, "anchor", None) is not None: # pyright: ignore[reportUnknownArgumentType]
             raise yaml.YAMLError("Anchors are not allowed")
 
         return super().compose_node(parent, index)
@@ -458,7 +475,7 @@ def _dict_constructor(loader: SimpleYAMLLoader, node: yaml.nodes.Node) -> Dict[s
     wrong_key_type = next((type(key).__name__ for key in res.keys() if type(key) != str), None)
     if wrong_key_type is not None:
         raise yaml.constructor.ConstructorError(f"key of map must be str, got: {wrong_key_type}")
-    return res # type: ignore
+    return res # pyright: ignore[reportReturnType]
 
 SimpleYAMLLoader.add_constructor("tag:yaml.org,2002:map", _dict_constructor)
 
@@ -477,6 +494,9 @@ def load_YAML(link: Link) -> JSON:
 
 
 class ExYAMLLoader(SimpleYAMLLoader):
+    """
+    loader for yaml with !include and !merge, and keep other tags.
+    """
     def set_filepath(self, filepath: Path):
         self.filepath = filepath
 
@@ -506,7 +526,7 @@ def _include_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJ
             data = subloader.get_single_data()
         finally:
             subloader.dispose() # pyright: ignore[reportUnknownMemberType]
-    return link.fieldpath.walk(data) # type: ignore
+    return link.fieldpath.walk(data) # pyright: ignore[reportReturnType]
 
 def _merge_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSON:
     if not isinstance(node, yaml.nodes.SequenceNode):
@@ -522,7 +542,7 @@ def _merge_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSO
     obj = objs[0]
     for obj_ in objs[1:]:
         obj = deep_update(obj, obj_)
-    return obj # type: ignore
+    return obj # pyright: ignore[reportReturnType]
 
 def _unknown_tag_constructor(loader: ExYAMLLoader, tag_suffix: str, node: yaml.nodes.Node) -> TaggedJSON:
     if isinstance(node, yaml.ScalarNode):
@@ -560,13 +580,14 @@ def load_ExYAML(link: Link) -> TaggedJSON:
         try:
             data = loader.get_single_data()
         finally:
-            loader.dispose() # type: ignore
-    return link.fieldpath.walk(data) # type: ignore
+            loader.dispose() # pyright: ignore[reportUnknownMemberType]
+    # walk works for TaggedList and TaggedDict
+    return link.fieldpath.walk(data) # pyright: ignore[reportReturnType]
 
 
 class SimpleYAMLDumper(yaml.SafeDumper):
     """
-    dump json object as yaml format without alias.
+    dumper for json object as yaml format without alias.
     str scalars always quote.
     block style seqs always indent.
     vector-like seqs/maps use flow style.
@@ -603,16 +624,16 @@ def _list_representer(self: SimpleYAMLDumper, data: List[JSON]):
 
 def _dict_representer(self: SimpleYAMLDumper, data: Dict[str, JSON]):
     content = [
-        (yaml.SafeDumper.represent_str(self, k), self.represent_data(v)) # type: ignore
+        (yaml.SafeDumper.represent_str(self, k), self.represent_data(v)) # pyright: ignore[reportUnknownMemberType]
         for k, v in data.items()
     ]
     return yaml.nodes.MappingNode('tag:yaml.org,2002:map', content, flow_style=is_vec_like(data))
 
 def _dstr_representer(self: SimpleYAMLDumper, data: str):
     if "\n" in data:
-        return self.represent_scalar('tag:yaml.org,2002:str', data, style='|') # type: ignore
+        return self.represent_scalar('tag:yaml.org,2002:str', data, style='|') # pyright: ignore[reportUnknownMemberType]
     else:
-        return self.represent_scalar('tag:yaml.org,2002:str', data, style='"') # type: ignore
+        return self.represent_scalar('tag:yaml.org,2002:str', data, style='"') # pyright: ignore[reportUnknownMemberType]
 
 SimpleYAMLDumper.add_representer(list, _list_representer)
 SimpleYAMLDumper.add_representer(dict, _dict_representer)
@@ -630,6 +651,9 @@ def save_YAML(data: JSON, path: Path):
 
 
 class ExYAMLDumper(SimpleYAMLDumper):
+    """
+    dumper for tagged json object.
+    """
     pass
 
 def _tagged_scalar_representer(self: ExYAMLDumper, data: TaggedScalar):
@@ -641,7 +665,7 @@ def _tagged_list_representer(self: ExYAMLDumper, data: TaggedList):
 
 def _tagged_dict_representer(self: ExYAMLDumper, data: TaggedDict):
     content = [
-        (yaml.SafeDumper.represent_str(self, k), self.represent_data(v)) # type: ignore
+        (yaml.SafeDumper.represent_str(self, k), self.represent_data(v)) # pyright: ignore[reportUnknownMemberType]
         for k, v in data.items()
     ]
     return yaml.nodes.MappingNode(f"!{data.tag}", content, flow_style=is_vec_like(data))
@@ -664,10 +688,10 @@ def _resolve_yaml(link: str):
     """
 
     import warnings
-    def formatwarning(message, category, filename, lineno, line=None): # type: ignore
+    def formatwarning(message, category, filename, lineno, line=None): # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]
         return "".join(
             f"# {'     ' if i else 'WARN:'} {line}\n"
-            for i, line in enumerate(str(message).splitlines()) # type: ignore
+            for i, line in enumerate(str(message).splitlines()) # pyright: ignore[reportUnknownArgumentType]
         )
     warnings.formatwarning = formatwarning
 
