@@ -390,6 +390,36 @@ you don't need to setup network settings (`ROS_IP` and `ROS_MASTER_URI`) for run
 they will be configured automatically according to the local machine you set.
 
 
-## monoparam
+### Resource
+some ros packages, such as rviz marker, accept resource uri:
+`http://<link path>`, `package://<package name>/<relative path>` and `file://<absolute path>`.
+where file path is the local file path, which does not always work if node changes the place.
+roslaunch doesn't have proper resources management system, user should synchronize resource manually.
+technically, one can store/transfer files as binary data through ros parameter server, but it is not a good idea for large data.
 
-## monoresource
+in monolaunch, you can use !resource to mark the string scalar as resource uri,
+and if it is local file, that is `file://<relative or absolute path>`,
+it will be synchronized to proper machine.
+or via
+```python
+set_param({
+    "my_resource": Path(my_resource_path), # Path object is recognized as !resource file://...
+})
+```
+the machine is determined by when it is loaded/set into monolaunch
+```python
+with machine_1:
+    set_param({"file": Path(file_path)})  # file will be synced to machine_1
+with machine_2:
+    load_param({"config": Link.parse(config_link)})  # resources in config_link will be synced to machine_2
+```
+they should be in put into private namespace of the node requires them.
+
+monoparam will translate them to resource uri, like `ros_home://<relative path to ROS_HOME>`,
+so to access those reosurces, just get the resolved resource uri from param server.
+
+resources are synchronized by monoresource, one can run it by yourself via
+`python -m monolaunch.monoresource <resolved param file>`.
+
+
+## monoparam
