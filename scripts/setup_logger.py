@@ -115,7 +115,10 @@ def generate_logger_config(logger_config: LoggerConfig) -> Tuple[str, str]:
     return python_logging_conf_content, rosconsole_config_content
 
 def get_logger_config(fieldpath: FieldPath) -> LoggerConfig:
-    logger_config = get_param(fieldpath)
+    try:
+        logger_config = get_param(fieldpath)
+    except KeyError:
+        logger_config = {}
     if not isinstance(logger_config, dict):
         raise TypeError(f"[setup_logger] parameter {fieldpath} expect dict, got {type(logger_config).__name__}")
     for key, level in logger_config.items():
@@ -136,13 +139,14 @@ def determine_ros_logger_config_fieldpath() -> Optional[FieldPath]:
 
 def setup_logger(fieldpath: FieldPath):
     ros_logger_config = get_logger_config(fieldpath)
-    python_logging_conf_content, rosconsole_config_content = generate_logger_config(ros_logger_config)
-    config_dir = ros_home() / f"resources/ros_logger_configs{fieldpath!s}"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "python_logging.conf").write_text(python_logging_conf_content)
-    (config_dir / "rosconsole.config").write_text(rosconsole_config_content)
-    os.environ["ROS_PYTHON_LOG_CONFIG_FILE"] = str(config_dir / "python_logging.conf")
-    os.environ["ROSCONSOLE_CONFIG_FILE"] = str(config_dir / "rosconsole.config")
+    if ros_logger_config:
+        python_logging_conf_content, rosconsole_config_content = generate_logger_config(ros_logger_config)
+        config_dir = ros_home() / f"resources/ros_logger_configs{fieldpath!s}"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "python_logging.conf").write_text(python_logging_conf_content)
+        (config_dir / "rosconsole.config").write_text(rosconsole_config_content)
+        os.environ["ROS_PYTHON_LOG_CONFIG_FILE"] = str(config_dir / "python_logging.conf")
+        os.environ["ROSCONSOLE_CONFIG_FILE"] = str(config_dir / "rosconsole.config")
 
 def main():
     fieldpath = determine_ros_logger_config_fieldpath()
