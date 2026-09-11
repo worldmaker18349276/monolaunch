@@ -1,15 +1,49 @@
 #!/usr/bin/env python3
 
+import contextlib
 from pathlib import Path
 import shlex
 import subprocess
 import signal
 import sys
 import os
-from typing import Any, Tuple
+from typing import Tuple
 from monolaunch.monoresource import Machine
 import xml.etree.ElementTree as ET
 
+
+@contextlib.contextmanager
+def prun(command, force_exit=False, exit_timeout=10, **kwargs):
+    """
+    usage:
+    with prun(["cmd", "arg1", "arg2"], stdout=subprocess.PIPE) as p_task: # spawn a process
+        ... # do some works
+        p_task.wait() # wait until done
+    # it will try to interrupt the process (SIGINT)
+    # if force_exit is True, kill it after {exit_timeout} sec
+    """
+    process = None
+    try:
+        kwargs = {
+            "stdin": subprocess.PIPE,
+            "stdout": None,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            **kwargs,
+        }
+        process = subprocess.Popen(command, **kwargs)
+        yield process
+    finally:
+        if process is not None and process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            
+            try:
+                process.wait(timeout=exit_timeout)
+            except subprocess.TimeoutExpired:
+                if not force_exit: raise
+                print(f"[with_roscore] fail to interrupt process {command}, will kill it")
+                process.kill()
+                process.wait()
 
 def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Machine]:
     root = ET.parse(launch_file).getroot()
@@ -47,6 +81,7 @@ def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Machine]:
     return local, master
 
 def main():
+    print(shlex.join(sys.argv))
     command = sys.argv[1:]
     if len(command) < 2 or not command[1].endswith(".launch"):
         raise ValueError("[with_roscore] with_roscore.py must be prefixed before `roslaunch <launch_file.launch> ...`")
@@ -59,31 +94,16 @@ def main():
     os.environ["ROS_MASTER_URI"] = ros_master_uri
 
     roscore = master.command(["roscore"])
+    command = local.command(command)
+
     print("[with_roscore] run roscore", roscore)
-    roscore_proc = subprocess.Popen(roscore)
-    # TODO: exit if roscore is dead
-
-    def cleanup(*_: Any):
-        print("[with_roscore] cleanup roscore...")
-        roscore_proc.terminate()
-        try:
-            roscore_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            roscore_proc.kill()
-            roscore_proc.wait()
-
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, cleanup)
-
-    try:
-        command = local.command(command)
+    #                  _________________ to prevent SIGINT propagates into subprocess
+    with prun(roscore, start_new_session=True):
         print("[with_roscore] run roslaunch", command)
-        result = subprocess.run(command)
-
-    finally:
-        cleanup()
-
-    sys.exit(result.returncode)
+        with prun(command, force_exit=True, exit_timeout=30) as roslaunch_proc:
+            result_returncode = roslaunch_proc.wait()
+    sys.exit(result_returncode)
 
 if __name__ == "__main__":
-    main()
+    with contextlib.suppress(KeyboardInterrupt):
+        main()
