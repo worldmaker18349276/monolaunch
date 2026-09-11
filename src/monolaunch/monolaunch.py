@@ -938,6 +938,7 @@ def _run(launch_func: Callable[[], None]) -> Optional[Tuple[str, ...]]:
     dry_run = bool(args.dry_run)
     need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
     cmd = sys.argv[:]
+    sys.argv[1:] = unknown
     
     try:
         launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
@@ -950,10 +951,11 @@ def _run(launch_func: Callable[[], None]) -> Optional[Tuple[str, ...]]:
         os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
         return cmd
 
-    cmd = ("roslaunch", str(launch_filepath), *unknown)
+    cmd = ("roslaunch", str(launch_filepath), *sys.argv[1:])
     if dry_run:
         print("will not execute because dry-run is set:\n" + shlex.join(cmd))
         return ()
+    print("start launch:\n" + shlex.join(cmd))
     return cmd
 
 def _indent(el: ET.Element, level: int = 0):
