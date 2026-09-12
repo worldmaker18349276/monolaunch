@@ -876,16 +876,12 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
             else:
                 raise
 
-        # save param
-        # TODO: add option to embed param into launch file (how?)
         param_node = ctx().param_node
         check_foreign_sync_resources(ctx())
         if param_node is None:
             param_node = ctx().param_loader.new(ctx().params_filepath)
             assert param_node is not None
-        with open(ctx().params_filepath, "w") as f:
-            yaml.dump(param_node.sources[0].data, f, Dumper=SourcedYAMLDumper, sort_keys=False)
-
+        param = param_node.sources[0].data
 
         launch_el = ET.Element("launch")
 
@@ -897,25 +893,25 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
         launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_expr", default=AUTO_RELAUNCH_WITH_ROSCORE_EXPR)))
         launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_res", default="$(eval eval(auto_relaunch_with_roscore_expr))")))
 
-        # add initial param resolver
         if param_node:
-            launch_el.append(ET.Element("arg", dict(name="monoparam_source", default=str(ctx().params_filepath))))
-            launch_el.append(ET.Element("param", dict(name="$monoparam_source", type="str", value="$(arg monoparam_source)")))
-
-            resolved_param_expr = f"__import__('monolaunch.monoparam').monoparam.to_resolved(monoparam_source)"
-            launch_el.append(ET.Element("arg", dict(name="resolved_param_expr", default=resolved_param_expr)))
+            # add param resolver
+            launch_el.append(ET.Element("arg", dict(
+                name="source_param_pointer",
+                default="$(arg filename)#xpointer(/launch/rosparam[@param='/'])",
+            )))
+            launch_el.append(ET.Element("arg", dict(
+                name="resolved_param_expr",
+                default="__import__('monolaunch.monoparam').monoparam.to_resolved(source_param_pointer)",
+            )))
             launch_el.append(ET.Element("arg", dict(name="resolved_param", default="$(eval eval(resolved_param_expr))")))
+            param_el = ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)", param="/"))
+            param_el.text = yaml.dump(param, Dumper=SourcedYAMLDumper, sort_keys=False)
+            launch_el.append(param_el)
 
-            # # DEBUG: resolve once
-            # monoparam.to_resolved(ctx().params_filepath)
-
-        # add <rosparam>
-        launch_el.append(ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)")))
-
-        # add resource loader
-        sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param + '#/$sync_resources')"
-        launch_el.append(ET.Element("arg", dict(name="sync_resources_expr", default=sync_resources_expr)))
-        launch_el.append(ET.Element("arg", dict(name="sync_resources", default="$(eval eval(sync_resources_expr))")))
+            # add resource loader
+            sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param + '#/$sync_resources')"
+            launch_el.append(ET.Element("arg", dict(name="sync_resources_expr", default=sync_resources_expr)))
+            launch_el.append(ET.Element("arg", dict(name="sync_resources", default="$(eval eval(sync_resources_expr))")))
         
         # add <machine>
         for machine in ctx().machines.values():

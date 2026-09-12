@@ -40,6 +40,7 @@ from typing import Any, Dict, Generator, List, Literal, Tuple, Set, Union, Optio
 import sys
 import math
 import yaml
+import xml.etree.ElementTree as ET
 import urllib.parse
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -1899,7 +1900,55 @@ class YAMLSynchronizer:
             status = status_
             time.sleep(dt)
 
-def to_resolved(source_path: Union[str, Path], skip_empty: bool = True, aggregate_sync_resources: bool = True) -> str:
+
+@dataclass
+class XPointer:
+    filepath: Path
+    xpath: str
+    
+    @staticmethod
+    def parse(path: str) -> "XPointer":
+        filepath, fieldpath = (*path.rsplit("#", 1), "")[:2]
+        if fieldpath and not (fieldpath.startswith("xpointer(") and fieldpath.endswith(")")):
+            raise ValueError(f"invalid xpointer: {path}")
+        fieldpath = fieldpath[len("xpointer("):-len(")")]
+        return XPointer(Path(filepath), fieldpath)
+
+    def __str__(self):
+        return f"{self.filepath}#xpointer({self.xpath})"
+
+    def get(self):
+        with open(self.filepath, "r") as f:
+            root = ET.parse(f)
+        # for API, ./launch/rosparam means: {whatever root node} > launch > rosparam
+        # but I want: launch (is the root node) > rosparam
+        wrapper = ET.Element("_document")
+        wrapper.append(root.getroot())
+        return wrapper.find("." + self.xpath)
+
+def parse_jsonpointer_or_xpointer(path: Union[str, Path, Link, XPointer]) -> Union[Link, XPointer]:
+    if isinstance(path, Link):
+        return path
+    if isinstance(path, XPointer):
+        return path
+
+    if isinstance(path, Path):
+        path = str(path)
+        if "#" in path:
+            path += "#"
+
+    suffix = Path(path.rsplit("#", 1)[0]).suffix
+
+    if suffix == ".yaml":
+        return Link.parse(path)
+    
+    elif suffix == ".launch":
+        return XPointer.parse(path)
+
+    else:
+        raise ValueError(f"unknown file type: {path}")
+
+def to_resolved(source_path: Union[str, Path, Link, XPointer], skip_empty: bool = True, aggregate_sync_resources: bool = True) -> str:
     """
     resolve yaml file, save as {name}.resolved.yaml, returns resolved yaml file path.
 
@@ -1907,8 +1956,24 @@ def to_resolved(source_path: Union[str, Path], skip_empty: bool = True, aggregat
     if aggregate_sync_resources is true, it will append field "$sync_resources" at the root.
     """
     
-    source_path = Path(source_path)
-    resolved_path = source_path.parent / f"{source_path.stem}.resolved.yaml"
+    source_path = parse_jsonpointer_or_xpointer(source_path)
+    parent = source_path.filepath.parent
+    stem = source_path.filepath.stem
+
+    if isinstance(source_path, XPointer):
+        elem = source_path.get()
+        if elem is None:
+            raise ValueError(f"fail to read embeded param: {source_path}")
+        extracted_path = parent / f"{stem}.extracted.yaml"
+        print(f"yaml is embeded in a xml, extract into {extracted_path}")
+        extracted_path.write_text(elem.text or "")
+        source_path = Link(extracted_path)
+
+    if source_path.fieldpath:
+        raise ValueError(f"cannot resolve only part of yaml: {source_path}") # TODO
+    source_path = source_path.filepath
+
+    resolved_path = parent / f"{stem}.resolved.yaml"
     if resolved_path.exists():
         resolved_path.unlink()
     resolved_path.touch()
@@ -1918,6 +1983,7 @@ def to_resolved(source_path: Union[str, Path], skip_empty: bool = True, aggregat
     sync.aggregate_sync_resources = aggregate_sync_resources
     sync.init()
     sync.resolve()
+
     return str(resolved_path)
 
 if __name__ == "__main__":
