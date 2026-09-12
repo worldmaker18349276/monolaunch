@@ -948,14 +948,9 @@ def run(launch_func: Callable[[], None]) -> Any:
         return launch_func
     # only run on main
     cmd = _run(launch_func)
-    if cmd is None:
-        exit(1)
-    elif cmd == ():
-        exit(0)
-    else:
-        os.execvp(cmd[0], cmd)
+    cmd()
 
-def _run(launch_func: Callable[[], None]) -> Optional[Tuple[str, ...]]:
+def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
     argparser = argparse.ArgumentParser(
         add_help=False,
         usage="%(prog)s [--dry-run] [ARGS ...]",
@@ -964,25 +959,26 @@ def _run(launch_func: Callable[[], None]) -> Optional[Tuple[str, ...]]:
     args, unknown = argparser.parse_known_args()
     dry_run = bool(args.dry_run)
     need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
-    cmd = sys.argv[:]
+    os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
+    cmd = [sys.executable, *sys.argv]
     sys.argv[1:] = unknown
     
     try:
         launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
     except Exception:
         traceback.print_exc()
-        return None
+        return lambda: exit(1)
     except _Regenerate as regen:
         cmd = regen.machine.command(cmd)
         print("regenerate launch file with local env-loader:\n" + shlex.join(cmd))
-        os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
-        return cmd
+        return lambda: os.execvp(cmd[0], cmd)
 
     cmd = ("roslaunch", str(launch_filepath), *sys.argv[1:])
     if dry_run:
         print("will not execute because dry-run is set:\n" + shlex.join(cmd))
-        return ()
+        return lambda: exit(0)
     print("start launch:\n" + shlex.join(cmd))
+    return lambda: os.execvp(cmd[0], cmd)
 
 TABSIZE = 4
 
