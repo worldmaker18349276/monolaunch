@@ -839,7 +839,7 @@ FILENAME_EXPR = """
         zip(dirname.__code__.co_freevars, dirname.__closure__)
     )['context'].cell_contents['filename']
 )
-""".replace("\n", " ")
+"""
 
 AUTO_RELAUNCH_WITH_ROSCORE_EXPR = """
 (
@@ -859,7 +859,7 @@ AUTO_RELAUNCH_WITH_ROSCORE_EXPR = """
         *__import__('sys').argv
     ])
 )
-""".replace("\n", " ")
+"""
 
 def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
     with _with_ctx():
@@ -933,11 +933,12 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
                 launch_el.append(node.to_xml(machine_xml=node.machine.to_xml(default=True)))
 
         _indent(launch_el)
+        launch_str = ET.tostring(launch_el, encoding="unicode", xml_declaration=True)
+        launch_str = _indent_attrib(launch_str)
 
         # save launch file
         launch_filepath = cwd / f"{name}.launch"
-        with open(launch_filepath, "wb") as f:
-            ET.ElementTree(launch_el).write(f, encoding="utf-8", xml_declaration=True)
+        launch_filepath.write_text(launch_str)
 
         return launch_filepath
 
@@ -982,16 +983,37 @@ def _run(launch_func: Callable[[], None]) -> Optional[Tuple[str, ...]]:
         print("will not execute because dry-run is set:\n" + shlex.join(cmd))
         return ()
     print("start launch:\n" + shlex.join(cmd))
-    return cmd
 
-def _indent(el: ET.Element, level: int = 0):
-    indent = "\n" + "  " * level
-    if len(el):
-        if not el.text or not el.text.strip(): el.text = indent + "  "
-        if not el.tail or not el.tail.strip(): el.tail = indent
-        for child in el: _indent(child, level + 1)
-        child = el[-1]
-        if not child.tail or not child.tail.strip(): child.tail = indent
-    else:
-        if level and (not el.tail or not el.tail.strip()): el.tail = indent
-    if not level: el.tail = "\n"
+TABSIZE = 4
+
+def _indent(el: ET.Element, level: int = 0, is_last: bool = False):
+    """
+    indent tags and plain text
+    """
+    if len(el) or el.text:
+        text = (el.text or "").strip("\n")
+        text = "\n" if not text else f"\n{text}\n"
+        el.text = text.replace("\n", "\n" + " " * TABSIZE * (level + 1))
+        if len(el) == 0 and level > 0:
+            el.text = el.text[:-TABSIZE]
+
+    tail = (el.tail or "").strip("\n")
+    tail = "\n" if not tail else f"\n{tail}\n"
+    el.tail = tail.replace("\n", "\n" + " " * TABSIZE * level)
+    if is_last and level > 0:
+        el.tail = el.tail[:-TABSIZE]
+
+    for i, child in enumerate(el):
+        _indent(child, level + 1, i+1 == len(el))
+
+def _indent_attrib(xml_str: str, level: int = 0) -> str:
+    """
+    recover newline of attributes with proper indentation.
+    """
+    res: List[str] = []
+    for line in xml_str.split("\n"):
+        line_ = line.lstrip()
+        indent = line[:len(line) - len(line_)]
+        line = line.replace("&#10;", "\n" + indent)
+        res.append(line)
+    return "\n".join(res)
