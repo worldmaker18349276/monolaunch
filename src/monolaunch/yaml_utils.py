@@ -500,7 +500,12 @@ class ExYAMLLoader(SimpleYAMLLoader):
     def set_filepath(self, filepath: Path):
         self.filepath = filepath
 
+    def set_raw(self, raw: bool):
+        self.raw = raw
+
 def _include_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSON:
+    if loader.raw:
+        return _unknown_tag_constructor(loader, "include", node)
     if not isinstance(node, yaml.nodes.ScalarNode):
         raise yaml.constructor.ConstructorError(
             None, None,
@@ -529,6 +534,8 @@ def _include_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJ
     return link.fieldpath.walk(data) # pyright: ignore[reportReturnType]
 
 def _merge_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSON:
+    if loader.raw:
+        return _unknown_tag_constructor(loader, "merge", node)
     if not isinstance(node, yaml.nodes.SequenceNode):
         raise yaml.constructor.ConstructorError(
             None, None,
@@ -569,14 +576,16 @@ ExYAMLLoader.add_constructor("!merge", _merge_constructor)
 ExYAMLLoader.add_multi_constructor("!", _unknown_tag_constructor) # pyright: ignore[reportUnknownMemberType]
 
 # @raises(FieldAccessError)
-def load_ExYAML(link: Link) -> TaggedJSON:
+def load_ExYAML(link: Link, raw: bool = False) -> TaggedJSON:
     """
     load yaml with !include and !merge, and keep other tags.
+    if raw is true, don't resolve !include and !merge.
     """
     filepath = link.filepath.resolve()
     with open(filepath, 'r') as f:
         loader = ExYAMLLoader(f)
         loader.set_filepath(filepath)
+        loader.set_raw(raw)
         try:
             data = loader.get_single_data()
         finally:
@@ -682,7 +691,7 @@ def save_ExYAML(data: TaggedJSON, path: Path):
         yaml.dump(data, f, Dumper=ExYAMLDumper, sort_keys=False)
 
 
-def _resolve_yaml(link: str):
+def _resolve_yaml(link: str, raw: bool = False):
     """
     load and dumps resolved yaml (!include, !merge are resolved, other tags are kept)
     """
@@ -695,7 +704,7 @@ def _resolve_yaml(link: str):
         )
     warnings.formatwarning = formatwarning
 
-    data = load_ExYAML(Link.parse(link))
+    data = load_ExYAML(Link.parse(link), raw)
     data_str = yaml.dump(data, Dumper=ExYAMLDumper, sort_keys=False)
 
     sys.stderr.flush()
@@ -703,7 +712,11 @@ def _resolve_yaml(link: str):
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) != 2:
-        print("python -m monolaunch.yaml_utils <yaml file>\n" + cleandoc(_resolve_yaml.__doc__ or ""), file=sys.stderr)
+    if len(sys.argv) < 2:
+        print("python -m monolaunch.yaml_utils [--raw] <yaml file>\n" + cleandoc(_resolve_yaml.__doc__ or ""), file=sys.stderr)
         exit(1)
-    _resolve_yaml(sys.argv[1])
+    raw = False
+    if "--raw" in sys.argv:
+        raw = True
+        sys.argv.remove("--raw")
+    _resolve_yaml(sys.argv[1], raw)
