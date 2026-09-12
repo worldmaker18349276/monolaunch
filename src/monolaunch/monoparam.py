@@ -1901,7 +1901,7 @@ class YAMLSynchronizer:
             time.sleep(dt)
 
 
-@dataclass
+@dataclass(frozen=True)
 class XPointer:
     filepath: Path
     xpath: str
@@ -1940,10 +1940,14 @@ def parse_jsonpointer_or_xpointer(path: Union[str, Path, Link, XPointer]) -> Uni
     suffix = Path(path.rsplit("#", 1)[0]).suffix
 
     if suffix == ".yaml":
-        return Link.parse(path)
+        link = Link.parse(path)
+        link = Link(link.filepath.resolve(), link.fieldpath)
+        return link
     
     elif suffix == ".launch":
-        return XPointer.parse(path)
+        pointer = XPointer.parse(path)
+        pointer = XPointer(pointer.filepath.resolve(), pointer.xpath)
+        return pointer
 
     else:
         raise ValueError(f"unknown file type: {path}")
@@ -1965,19 +1969,25 @@ def to_resolved(source_path: Union[str, Path, Link, XPointer], skip_empty: bool 
         if elem is None:
             raise ValueError(f"fail to read embeded param: {source_path}")
         extracted_path = parent / f"{stem}.extracted.yaml"
-        print(f"yaml is embeded in a xml, extract into {extracted_path}")
+        print(f"yaml is embeded in a xml, extract into {extracted_path}", file=sys.stderr)
         extracted_path.write_text(elem.text or "")
         source_path = Link(extracted_path)
 
     if source_path.fieldpath:
-        raise ValueError(f"cannot resolve only part of yaml: {source_path}") # TODO
+        raw_source_json = load_ExYAML(source_path, True)
+        raw_source_str = yaml.dump(raw_source_json, Dumper=ExYAMLDumper, sort_keys=False)
+        extracted_path = parent / f"{stem}.extracted.yaml"
+        print(f"only a portion of yaml need to be resolved, extract into {extracted_path}", file=sys.stderr)
+        extracted_path.write_text(raw_source_str)
+        source_path = Link(extracted_path)
+
     source_path = source_path.filepath
 
     resolved_path = parent / f"{stem}.resolved.yaml"
     if resolved_path.exists():
         resolved_path.unlink()
     resolved_path.touch()
-    print(f"resolve {source_path} -> {resolved_path}")
+    print(f"resolve {source_path} -> {resolved_path}", file=sys.stderr)
     sync = YAMLSynchronizer(source_path, resolved_path)
     sync.skip_empty = skip_empty
     sync.aggregate_sync_resources = aggregate_sync_resources
@@ -1990,4 +2000,4 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("usage: python -m monolaunch.monoparam <source yaml file>\n" + cleandoc(to_resolved.__doc__ or ""), file=sys.stderr)
         exit(1)
-    to_resolved(sys.argv[1])
+    print(to_resolved(sys.argv[1]))
