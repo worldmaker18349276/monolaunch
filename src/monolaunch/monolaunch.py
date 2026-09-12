@@ -829,13 +829,35 @@ def check_foreign_sync_resources(ctx: Ctx):
                         host_node_name = f"node {_join_ns((*host_node.ns, host_node.name))}"
                     warnings.warn(ForeignSyncResourceWarning(resource_name, runtime_machine_name, host_node_name, host_machine_name))
 
+FILENAME_EXPR = """
+(lambda p:
+    str(__import__('pathlib').Path(p).resolve())
+    if p != 'string'
+    else ''
+)(
+    dict(
+        zip(dirname.__code__.co_freevars, dirname.__closure__)
+    )['context'].cell_contents['filename']
+)
+""".replace("\n", " ")
+
 AUTO_RELAUNCH_WITH_ROSCORE_EXPR = """
 (
-    not optenv('NO_RELAUNCH_WITH_ROSCORE', '')
-    and __import__('os').execv(
-        __import__('rospkg').RosPack().get_path('monolaunch') + '/scripts/with_roscore.py',
-        ['with_roscore.py', *__import__('sys').argv]
+    True
+    and not __import__('os').getenv('NO_RELAUNCH_WITH_ROSCORE', '')
+    and not __import__('os').putenv('NO_RELAUNCH_WITH_ROSCORE', '1')
+    and (
+        filename
+        or print('launch through piping, disable relaunch with roscore')
     )
+    and (lambda cmd:
+        print(__import__('shlex').join(cmd))
+        or __import__('os').execv(cmd[0], cmd)
+    )([
+        __import__('rospkg').RosPack().get_path('monolaunch') + '/scripts/with_roscore.py',
+        '--filename', filename,
+        *__import__('sys').argv
+    ])
 )
 """.replace("\n", " ")
 
@@ -866,6 +888,10 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
 
 
         launch_el = ET.Element("launch")
+
+        # extract filename
+        launch_el.append(ET.Element("arg", dict(name="filename_expr", default=FILENAME_EXPR)))
+        launch_el.append(ET.Element("arg", dict(name="filename", default="$(eval eval(filename_expr))")))
 
         # add auto relaunch with roscore
         launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_expr", default=AUTO_RELAUNCH_WITH_ROSCORE_EXPR)))

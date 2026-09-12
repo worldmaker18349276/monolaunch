@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+uage:
+with_roscore.py roslaunch <launch_file.launch> ...
+with_roscore.py --filename <launch_file.launch> roslaunch ...
+"""
 
 import contextlib
 from pathlib import Path
@@ -81,14 +86,26 @@ def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Machine]:
     return local, master
 
 def main():
-    print(shlex.join(sys.argv))
-    command = sys.argv[1:]
-    if len(command) < 2 or not command[1].endswith(".launch"):
-        raise ValueError("[with_roscore] with_roscore.py must be prefixed before `roslaunch <launch_file.launch> ...`")
-    command[1:1] = ["--wait"] # force to wait my roscore
-    os.environ["NO_RELAUNCH_WITH_ROSCORE"] = '1'
+    if len(sys.argv) <= 1:
+        raise ValueError("[with_roscore] usage: with_roscore.py roslaunch <launch_file.launch> ...")
 
-    local, master = _get_local_and_master_machine(Path(command[2]))
+    if sys.argv[1] != "--filename":
+        print("[with_roscore] --filename is not provided, will determine it automatically")
+        if len(sys.argv) < 3 or not sys.argv[1].endswith("/roslaunch") or not sys.argv[2].endswith(".launch"):
+            raise ValueError("[with_roscore] `with_roscore.py` must be prefixed before `roslaunch <launch_file.launch> ...`")
+        filename = Path(sys.argv[2]).resolve()
+        sys.argv[1:1] = ["--filename", str(filename)]
+
+    if len(sys.argv) < 4 or not sys.argv[2].endswith(".launch") or not sys.argv[3].endswith("/roslaunch"):
+        raise ValueError("[with_roscore] `with_roscore.py --filename <filename>` must be prefixed before `roslaunch ...`")
+    if not Path(sys.argv[2]).exists():
+        raise ValueError(f"[with_roscore] given filename {sys.argv[2]} doesn't exist")
+
+    filename = Path(sys.argv[2])
+    command = sys.argv[3:]
+    command[1:1] = ["--wait"] # force to wait my roscore
+
+    local, master = _get_local_and_master_machine(filename)
 
     ros_master_uri = f"http://{master.address}:11311"
     os.environ["ROS_MASTER_URI"] = ros_master_uri
@@ -96,10 +113,10 @@ def main():
     roscore = master.command(["roscore"])
     command = local.command(command)
 
-    print("[with_roscore] run roscore", roscore)
+    print("[with_roscore] run roscore:\n" + shlex.join(roscore))
     #                  _________________ to prevent SIGINT propagates into subprocess
     with prun(roscore, start_new_session=True):
-        print("[with_roscore] run roslaunch", command)
+        print("[with_roscore] run roslaunch:\n" + shlex.join(command))
         with prun(command, force_exit=True, exit_timeout=30) as roslaunch_proc:
             result_returncode = roslaunch_proc.wait()
     sys.exit(result_returncode)
