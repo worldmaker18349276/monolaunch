@@ -433,6 +433,7 @@ class Node:
 @dataclass
 class Master:
     machine: Optional["MachineCtx"] = None
+    mode: Literal["start", "wait", "auto"] = "auto"
 
     def __enter__(self):
         if ctx().master is not None:
@@ -452,6 +453,7 @@ class Master:
 
     def to_xml(self) -> ET.Element:
         attrs: Dict[str, str] = {}
+        attrs["mode"] = self.mode
         if self.machine:
             attrs["machine"] = self.machine.name
         el = ET.Element("master", attrs)
@@ -713,8 +715,8 @@ def machine(url: str = "", *, name: str = "", address: str = "", env_loader: Seq
             machine.name = machine_.name
     return machine
 
-def master() -> Master:
-    return Master()
+def master(mode: Literal["start", "wait", "auto"] = "auto") -> Master:
+    return Master(mode=mode)
 
 def node(*, name: str = "", pkg: str = "", type: Union[str, Path],
          output: Literal["log", "screen"] = "log", cwd: Literal["ROS_HOME", "node"] = "ROS_HOME",

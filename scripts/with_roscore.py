@@ -12,13 +12,17 @@ import subprocess
 import signal
 import sys
 import os
-from typing import Tuple
+from typing import Any, Optional, Sequence, Tuple
 from monolaunch.monoresource import Machine
 import xml.etree.ElementTree as ET
 
 
+def is_master_online() -> bool:
+    import rosgraph # pyright: ignore[reportMissingImports]
+    return rosgraph.is_master_online() # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
 @contextlib.contextmanager
-def prun(command, force_exit=False, exit_timeout=10, **kwargs):
+def prun(command: Sequence[str], force_exit: bool = False, exit_timeout: float = 10, **kwargs: Any):
     """
     usage:
     with prun(["cmd", "arg1", "arg2"], stdout=subprocess.PIPE) as p_task: # spawn a process
@@ -50,7 +54,7 @@ def prun(command, force_exit=False, exit_timeout=10, **kwargs):
                 process.kill()
                 process.wait()
 
-def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Machine]:
+def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Optional[Machine], str]:
     root = ET.parse(launch_file).getroot()
 
     machines = {
@@ -70,20 +74,23 @@ def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Machine]:
 
     local = get_machine("local")
     if not local.is_local():
-        raise RuntimeError("[with_roscore] local machine is not local")
+        raise RuntimeError(f"[with_roscore] local machine is not local: {local}")
 
     master = None
+    master_mode = "auto"
     for node in root.findall("master"):
         machine_name = node.get("machine")
         if machine_name is None:
-            raise RuntimeError("[with_roscore] cannot find machine attr in the master tag")
+            raise RuntimeError(f"[with_roscore] cannot find machine attr in the master tag: {ET.tostring(node)}")
         master = get_machine(machine_name)
+
+        master_mode = node.get("mode") or master_mode
+        if master_mode not in ("start", "wait", "auto"):
+            raise RuntimeError(f"[with_roscore] invalid mode attr in the master tag: {master_mode}")
+
         break
 
-    if master is None:
-        raise RuntimeError("[with_roscore] cannot find master tag")
-
-    return local, master
+    return local, master, master_mode
 
 def main():
     if len(sys.argv) <= 1:
@@ -103,14 +110,37 @@ def main():
 
     filename = Path(sys.argv[2])
     command = sys.argv[3:]
-    command[1:1] = ["--wait"] # force to wait my roscore
 
-    local, master = _get_local_and_master_machine(filename)
+    local, master, master_mode = _get_local_and_master_machine(filename)
+    
+    if master is not None:
+        ros_master_uri = f"http://{master.address}:11311"
+        os.environ["ROS_MASTER_URI"] = ros_master_uri
 
-    ros_master_uri = f"http://{master.address}:11311"
-    os.environ["ROS_MASTER_URI"] = ros_master_uri
+    if master is None:
+        command = local.command(command)
+        print("[with_roscore] no master tag, just run roslaunch:\n" + shlex.join(command))
+        os.execv(command[0], command)
+
+    if master_mode == "wait":
+        command[1:1] = ["--wait"]
+        command = local.command(command)
+        print("[with_roscore] master mode is wait, just run roslaunch:\n" + shlex.join(command))
+        os.execv(command[0], command)
+
+    if master_mode == "auto" and master.is_local():
+        command = local.command(command)
+        print("[with_roscore] master machine is local, just run roslaunch:\n" + shlex.join(command))
+        os.execv(command[0], command)
+
+    if master_mode == "auto" and is_master_online():
+        command[1:1] = ["--wait"]
+        command = local.command(command)
+        print("[with_roscore] master is online, just run roslaunch:\n" + shlex.join(command))
+        os.execv(command[0], command)
 
     roscore = master.command(["roscore"])
+    command[1:1] = ["--wait"] # force to wait my roscore
     command = local.command(command)
 
     print("[with_roscore] run roscore:\n" + shlex.join(roscore))
