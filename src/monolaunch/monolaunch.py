@@ -887,6 +887,14 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
 
         launch_el = ET.Element("launch")
 
+        # dry_run arg
+        launch_el.append(ET.Element("arg", dict(name="dry_run", default="0")))
+
+        # dry_run == 1
+        dry_run_1 = ET.Element("group", {"if": "$(eval dry_run == 1)"})
+        dry_run_1.append(ET.Element("node", dict(name="error", default="stop launch because dry_run == 1")))
+        launch_el.append(dry_run_1)
+
         # extract filename
         launch_el.append(ET.Element("arg", dict(name="filename_expr", default=FILENAME_EXPR)))
         launch_el.append(ET.Element("arg", dict(name="filename", default="$(eval eval(filename_expr))")))
@@ -910,10 +918,20 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
             param_el.text = yaml.dump(param, Dumper=SourcedYAMLDumper, sort_keys=False)
             launch_el.append(param_el)
 
+            # dry_run == 2
+            dry_run_2 = ET.Element("group", {"if": "$(eval dry_run == 2)"})
+            dry_run_2.append(ET.Element("node", dict(name="error", default="run until resolving param because dry_run == 2")))
+            launch_el.append(dry_run_2)
+
             # add resource loader
             sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param + '#/$sync_resources')"
             launch_el.append(ET.Element("arg", dict(name="sync_resources_expr", default=sync_resources_expr)))
             launch_el.append(ET.Element("arg", dict(name="sync_resources", default="$(eval eval(sync_resources_expr))")))
+
+            # dry_run == 3
+            dry_run_3 = ET.Element("group", {"if": "$(eval dry_run == 3)"})
+            dry_run_3.append(ET.Element("node", dict(name="error", default="run until sync resources because dry_run == 3")))
+            launch_el.append(dry_run_3)
         
         # add <machine>
         for machine in ctx().machines.values():
@@ -951,11 +969,11 @@ def run(launch_func: Callable[[], None]) -> Any:
 def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
     argparser = argparse.ArgumentParser(
         add_help=False,
-        usage="%(prog)s [--dry-run] [ARGS ...]",
+        usage="%(prog)s [--dry-run STAGE] [ARGS ...]",
     )
-    argparser.add_argument("--dry-run", action="store_true", help="generate launch file only")
+    argparser.add_argument("--dry-run", type=int, default=0, help="0: just run, 1: generate launch file only, 2: until resolve yaml file, 3: until sync resources")
     args, unknown = argparser.parse_known_args()
-    dry_run = bool(args.dry_run)
+    dry_run = int(args.dry_run)
     need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
     os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
     cmd = [sys.executable, *sys.argv]
@@ -972,9 +990,11 @@ def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
         return lambda: os.execvp(cmd[0], cmd)
 
     cmd = ("roslaunch", str(launch_filepath), *sys.argv[1:])
-    if dry_run:
-        print("will not execute because dry-run is set:\n" + shlex.join(cmd))
+    if dry_run == 1:
+        print("will not execute because --dry-run=1:\n" + shlex.join(cmd))
         return lambda: exit(0)
+    if dry_run > 0:
+        cmd = (*cmd, f"dry_run:={dry_run}")
     print("start launch:\n" + shlex.join(cmd))
     return lambda: os.execvp(cmd[0], cmd)
 

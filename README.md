@@ -251,6 +251,14 @@ since it has `file` attribute, the inner text will be ignored.
 since `with_roscore.py` and `monoparam.to_resolved` will parse original roslaunch file,
 you cannot use piping to feed launch file: `roslaunch ... - < xxx.launch`.
 
+we use invalid `<node>` tag to raise error conditionally:
+```xml
+<group if="$(eval ...)">
+  <node error="..."/>
+</group>
+```
+it utilizes the way roslaunch resolves tags: it only checks if a tag is valid after it enters this branch.
+
 we borrow the abandoned master tag for my auto-launch roscore mechanism.
 roslaunch will ignore the master tag; it is only used to provide information to `with_roscore.py`.
 technically, any unrecognized tag will be ignored.

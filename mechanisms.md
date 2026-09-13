@@ -2,6 +2,19 @@
 
 this document explains all the mechanisms in detail, including how bad the launch xml format is.
 
+## Process
+launch script has two phases: generation phase and launch phase:
+- generation
+  - run generation code, rerun after hitting the local machine for the first time
+  - construct launch file
+- launch
+  - relaunch with roscore prefix for the first time
+  - resolved parameters
+  - synchronize resources
+  - launch nodes
+
+you can use `--dry-run (1|2|3)` to run until: generate launch file; resolved parameters; synchronize resources.
+
 ## Remap
 the original mechanism of `<remap>` is:
 - remap tags only affect contents after the tag, limited in the scope (launch, group, node),
