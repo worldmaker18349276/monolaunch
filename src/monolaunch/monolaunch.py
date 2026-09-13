@@ -971,7 +971,13 @@ def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
         add_help=False,
         usage="%(prog)s [--dry-run STAGE] [ARGS ...]",
     )
-    argparser.add_argument("--dry-run", type=int, default=0, help="0: just run, 1: generate launch file only, 2: until resolve yaml file, 3: until sync resources")
+    argparser.add_argument(
+        "--dry-run",
+        type=int, choices=range(4), default=0,
+        help="0: just run, 1: until generating launch file, 2: until resolving yaml file, 3: until syncing resources"
+    )
+    if "-h" in sys.argv or "--help" in sys.argv:
+        argparser.print_help()
     args, unknown = argparser.parse_known_args()
     dry_run = int(args.dry_run)
     need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
