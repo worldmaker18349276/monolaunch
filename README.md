@@ -1,425 +1,258 @@
 # monolaunch
 
-## monolaunch
+monolaunch is my replacement of roslaunch.
 
-ROS1 Python API for generating flattened .launch files declaratively.
+it is just a launch file generator, but in python instead of ugly XML.
+the basic structure is the same, but we _fix_ some weird behaviors.
+it supports parameter resolving, resource management and more.
 
-All namespace / remap / env context is resolved and applied directly
-to each `<node>` or `<include>` tag - no nested `<group>` tags in the output.
-Params are hoisted to the top of the generated file.
+## Prerequisites
+ros-noetic, ssh, sshpass, rsync
 
-### Syntax
+## Usage
+this is my old launch file
+```xml
+<launch>
+  <arg name="vehicle_name" default="$(env vehicle_name)"/>
+  <arg name="vins_config" default="$(env vins_config)"/>
+  <arg name="rosconsole_config" default="$(env rosconsole_config)"/>
 
-|                                     |                                                                        |
-| ----------------------------------- | ---------------------------------------------------------------------- |
-| run(launch_func)                    | run launch file.  it will first generate flattened                     |
-|                                     | params, launch file and bash script to initialize                      |
-|                                     | and launch the program under current working directory                 |
-| with group(ns=...)                  | `<group>` tag                                                          |
-| with node(name, pkg, type, ...)     | `<node>` tag with private scope, can contain env, remap, param         |
-|                                     | if pkg is not given, type should be absolute path to the script to run |
-| with include(file, **args)          | `<include>` tag, can contain env, remap, param                         |
-|                                     | file is absolute path to the launch file to run                        |
-| set_env(dict)                       | `<env>` tag                                                            |
-| remap(dict)                         | `<remap>` tag                                                          |
-| set_param(dict)                     | `<param>` tag                                                          |
-| load_param(dict)                    | `<rosparam>` tag, load parameters from file, support json pointer      |
-| get_value("file.yaml#/sub/field")   | get value from given yaml file                                         |
-| get_value((json_obj, "sub/field"))  | get value from object directly                                         |
-| get_value("file.yaml#/sub/field", fallback) |  if value is missing or type doesn't match fallback,           |
-|                                     | fallback value will be returned.                                       |
-| with machine(name, address, ...)    | just like <machine> tag, set machine as default in a scope             |
-|                                     | for your convenience, you can pass in url like                         |
-|                                     | "machine://user:pswd@addr/path/to/env_loader.sh" directly              |
-| env(name, fallback)                 | just like `$(env name)` or `$(optenv name fallback)`                   |
-| find(pkg)                           | just like `$(find pkg)`                                                |
-| anon(name)                          | just like `$(anon name)`                                               |
-| dirname()                           | just like `$(dirname)`                                                 |
-| ns()                                | get current namespace, or use ns("~") for private namespace            |
-| @launch_prefix                      | make launch_prefix function, see `launch_prefix`                       |
-| load_logger("file.yaml#/logging")   | load logger config                                                     |
-| set_logger({"logger_name": "INFO"}) | set logger config directly                                             |
-| with master()                       | borrow removed `<master>` tag, for launching roscore remotely          |
+  <machine
+    name="$(arg vehicle_name)"
+    user="$(env vehicle_machine_user)"
+    address="$(env vehicle_machine_address)"
+    env-loader="$(env vehicle_machine_env_loader)"
+    />
 
+  <group ns="$(arg vehicle_name)">
+    <arg name="feature_topic_expr" default="__import__('yaml').safe_load(open(vins_config).get('feature_topic', ''))"/>
+    <arg name="feature_topic" default="$(eval eval(feature_topic_expr))"/>
 
-### Remap
-the original mechanism of `<remap>` is:
-- remap tags only affect contents after the tag, limited in the scope (launch, group, node),
-  and also affect nested group and the contents of include.
-  
-- they affect a node just like bring those tags into node scope, that is,
-  ```xml
-  <remap .../>
-  <node ...>
-  </node>
-  ```
-  act just like
-  ```xml
-  <node ...>
-      <remap .../>
-  </node>
-  ```
-  
-- to resolve a name, expand names under the node, than find the matched mapping.
-  for example, under a node (`/ns/node_name`), resolving a name (`sub/field`):
-  first, expand `sub/field` -> `/ns/sub/field`.
-  then expand remap's name, for a remap (`field` -> `/another`), it becomes (`/ns/field` -> `/another`).
-  it is different from `/ns/sub/field`, so it doesn't change.
+    <arg name="use_external_features_expr" default="__import__('yaml').safe_load(open(vins_config).get('use_external_features', False))"/>
+    <arg name="use_external_features" default="$(eval eval(use_external_features_expr))"/>
 
-  full expansion rule:
-  - start with "/" -> no expansion
-  - first element starts with "~" -> prepand with namespace and node name
-  - otherwise -> prepand with namespace
-  - special cases
-    - `abc//efg` -> `abc/efg`     (warning, still work)
-    - `/~abc/efg` -> `/~abc/efg`  (unusable)
-    - `~/abc/efg` -> `/abc/efg`   (why???)
+    <group unless="$(eval bool(feature_topic) if use_external_features else True)">
+      <node error="feature_topic should be given if use_external_features is true"/>
+    </group>
 
-there are few downside:
-- remap between relative paths is expanded under the place of node, not under the place of remap tag.
-  for example, in `<remap from="~sub/field" .../>`, "~" refers to any node name in the affect region.
-  a relative path remap outside the node scope may cause unexpected result.
-  
-- to remap a topic, you need to know which part is node namespace and which part is topic path,
-  even though they are the same for connection.
-  for example, a node (`/ns/node_name`) with topic (`sub/field`)
-  is different from, a node (`/ns/sub/node_name`) with topic (`field`), since:
-  - `<remap from="sub/field" .../>` only works on the first case;
-  - `<remap from="field" .../>` only works on the second case;
-  - `<remap from="/ns/sub/field" .../>` works on both cases.
-  
-- since namespacing a include file will change the full path of topics,
-  the only reliable way to make a launch file with remaps is using relative path remapping,
-  and it is aware of the node, you better to put remap into each node.
-  
-- remaps won't apply to topics under the namespace.
-  `<remap from="sub" .../>` don't apply to topic `sub/topic`.
-  to remap a series of topics, the only way is remap one by one.
-  if some topics are added in the future, you need to add corresponding remaps manually.
-  the only advantage of organizing topics by namespace is more pleasing.
-  
-  however, if you remap topic `camera/image_raw`, image_transport will automatically
-  remap related topics (`camera/camera_info`, `camera/image_raw/compressed`, etc.) for you.
-  this is done by programmatically detecting remaps and dealing with them accordingly.
-  in other words, this is custom magic; there is no universal way to do it.
+    <arg name="camera_topics_expr" default="__import__('yaml').safe_load(open(vins_config).get('camera_topics', []))"/>
+    <arg name="camera_topics" default="$(eval eval(camera_topics_expr))"/>
 
-- remaps can sometimes be chained together, and sometimes it can not.
-  ```xml
-  <remap from="a" to="b"/>
-  <remap from="b" to="c"/>
-  ```
-  will make topic `a` -> `c`, order is unrelated.
-  but for three steps case,
-  ```xml
-  <remap from="a" to="b"/>
-  <remap from="b" to="c"/>
-  <remap from="c" to="d"/>
-  ```
-  still map topic `a` to `c` instead of `d`.
-  
-  `rospy.resolve_name('a')` only maps once, so we got `'b'`.
-  loop is valid somehow
-  ```xml
-  <remap from="a" to="b"/>
-  <remap from="b" to="a"/>
-  ```
-  but I don't know where it remaps to finally.
-  for ambiguous remapping
-  ```xml
-  <remap from="a" to="b"/>
-  <remap from="a" to="c"/>
-  ```
-  the later one wins.
-  parameters can be remapped too, however, they will not chain together.
-  ```xml
-  <remap from="a" to="b"/>
-  <remap from="b" to="c"/>
-  ```
-  will make parameter `a` -> `b`.
-  
-the biggest mistake is the expansion timing.
-in monolaunch, remaps are always expand under the current scope,
-you can confidently inspect which path will be remapped to where,
-and no need to know which part is namespace and which part is topic path.
-we still don't recommand you to use absolute path remapping.
-we will chain the mapping to fix `rospy.resolve_name`, and will detect the looping problem.
+    <arg name="camera_topics_remaps" default="$(eval
+      ' '.join(
+        f'~input_{i}/image_raw:={t}'
+        for i, t in enumerate(camera_topics.split('\n'))
+      )
+    "/>
+    <node
+      machine="$(arg vehicle_name)"
+      name="vins"
+      pkg="vins"
+      type="vins_node"
+      args="$(arg camera_topics_remaps)">
+      <env name="ROSCONSOLE_CONFIG_FILE" value="$(arg rosconsole_config)"/>
+      <rosparam command="load" file="$(arg vins_config)"/>
+      <remap from="~concat/image_raw" to="camera/concat/image_raw"/>
 
-### Param
-the original mechanism of `<param>` is:
-- outside the private scope of node,
-  absolute names aren't expanded, and relative names are expanded by prepending current namespace:
-  ```xml
-  <group ns="/current/ns">
-    <param name="sub/field" .../>
-  </group>
-  ```
-  becomes
-  ```xml
-  <param name="/current/ns/sub/field" .../>
-  ```
-- inside the private scope of node,
-  it always prepend with current private namespace:
-  ```xml
-  <node ns="/current/ns" name="node_name" ...>
-    <param name="/sub/field" .../>
-  </node>
-  ```
-  becomes
-  ```xml
-  <param name="/current/ns/node_name/sub/field" .../>
-  ```
-- if param name prefix with "~", it will apply to every nodes after this tag in current scope:
-  ```xml
-  <param name="~sub/field" .../>
-  <node ns="/current/ns" name="node_name" .../>
-  ```
-  becomes
-  ```xml
-  <node ns="/current/ns" name="node_name" ...>
-    <param name="sub/field" .../>
-  </node>
-  ```
+      ...
+```
+it's ugly and contains a lot of abuse of eval.
+rewriting with monolaunch in python just fixes it.
 
-even if the param name and the remap name are in the same world, they have different rules.
-- param names outside the node are expanded under current scope;
-  remap names outside the node are expanded under the node it applied to.
-- param names prefixed with "~" will be applied to later nodes;
-  remap names prefixed with "~" will be expanded under private namespace.
-- param names inside the node are always expanded under private namespace;
-  remap names inside the node has no different from the outside.
-- who the fuck design those rules?
-
-in monolaunch, names are always expanded under current namespace
-(or current private namespace if prefixed with "~").
-noting that `~/field` and `~field` are the same in monolaunch, just replace `~` with `/ns/node_name/`.
-there is no way to apply a param to every nodes in the affect region, does anyone actually need this?
-
-to set/load param in monolaunch, use set_param and load_param, they can be nested structure, for example:
+we provide a simple launch file converter `launch_converter.py` (written with help of AI),
+it is of cause barely runnable but good for migration.
+or just rewrite your launch script by yourself
 ```python
-set_param({
-    "nested": {
-        "field_1": "nested",
-        "field_2": "fields",
-        "field_3": "are",
-        "field_4": "valid",
-    },
-    "path/to/field": "folded path is also valid",
-    "path/to": {
-        "another/field": "nested folded path? of cause!",
-        "": "empty path? fair enough~",
-    },
-    "~": {
-        "field": "yes, this is equivalent to ~field",
-    },
-    "array/0/x": "number will be treated as indexing, so this refer to curr_param.array[0].x",
-})
-```
+from monolaunch.monolaunch import *
 
-in load_param, its values are treated as file paths to load:
+def drone_vins(vins_config: Link, rosconsole_config: Path, vehicle_name: str, vehicle_machine_uri: str):
+    with machine(vehicle_machine_uri, name=vehicle_name), group(ns=vehicle_name):
+        if get_value(vins_config / "use_external_features", False):
+            assert get_value(vins_config / "feature_topic", ""), "feature_topic should be given if use_external_features is true"
+
+        with node(name="vins", pkg="vins", type="vins_node"):
+            set_env({'ROSCONSOLE_CONFIG_FILE': str(rosconsole_config)})
+            load_param({'~': vins_config})
+            remap({
+                '~concat/image_raw': 'camera/concat/image_raw',
+                **{
+                    f'~input_{i}/image_raw': t
+                    for i, t in enumerate(get_value(vins_config / "camera_topics", []))
+                },
+            })
+            
+            ...
+```
+it's now clean and readable.
+to make it launchable, you should write a main function
 ```python
-load_param({"another/path": "file/path/to/subconfig.yaml#/sub/field"})
+@run
+def main():
+    import argparse
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("--config")
+    args = argparser.parse_args()
+    
+    with machine("machine://localhost/wks/devel/setup.bash?=setup", name="local"):
+        config = Link.parse(args.config)
+        vins_config = config / "vins"
+        rosconsole_config = Path(get_value(config / "rosconsole", ""))
+        vehicle_name = get_value(config / "vehicle_name", "")
+        vehicle_machine_uri = get_value(config / "vehicle", "")
+
+        drone_vins(vins_config, rosconsole_config, vehicle_name, vehicle_machine_uri)
+        
+        ...
 ```
-this will load `file/path/to/subconfig.yaml`, take field `/sub/field`, and put into `another/path`
+it is recommended to manage all configurations in one config file like this.
+you must put local machine at the top level.
+now you can execute this script to launch your nodes,
+it will generate one launch file and launch it.
 
-we actually do not set/load param via rosparam command,
-but aggregate them into a single param file using !include and !merge,
-them resolve it before launch.
+the basic structure is the same, almost every tag has a corresponding function:
+| python                                | launch                                                                 |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| `run(launch_func)`                    | run launch script.  it will generate a launch file and launch the      |
+|                                       | program under current work directory.                                  |
+| `with group(ns=...)`                  | `<group>`.                                                             |
+| `with node(name, pkg, type, ...)`     | `<node>`.                                                              |
+| `with include(file, **args)`          | `<include>`, can contain env, remap, param.                            |
+|                                       | file is an absolute path to the launch file to run.                    |
+| `set_env(dict)`                       | `<env>`.                                                               |
+| `remap(dict)`                         | `<remap>`.                                                             |
+| `set_param(dict)`                     | `<param>`.                                                             |
+| `load_param(dict)`                    | `<rosparam>`, load parameters from file, support json pointer.         |
+| `get_value("file.yaml#/sub/field")`   | get value from given yaml file.                                        |
+| `get_value((json_obj, "sub/field"))`  | get value from object directly.                                        |
+| `get_value("file.yaml#/sub/field", fallback)` |  if value is missing or type doesn't match fallback,           |
+|                                       | fallback value will be returned.                                       |
+| `with machine(name, address, ...)`    | `<machine>` with scope, set machine as default in a scope.             |
+|                                       | for your convenience, you can pass in url like                         |
+|                                       | "machine://user:pswd@addr/path/to/env_loader.sh" directly.             |
+| `env(name, fallback)`                 | `$(env name)` or `$(optenv name fallback)`.                            |
+| `find(pkg)`                           | `$(find pkg)`.                                                         |
+| `anon(name)`                          | `$(anon name)`.                                                        |
+| `dirname()`                           | `$(dirname)`.                                                          |
+| `ns()`                                | get current namespace, or use `ns("~")` for private namespace.         |
+| `@launch_prefix`                      | make launch_prefix function, see `launch_prefix`.                      |
+| `load_logger("file.yaml#/logging")`   | load logger config.                                                    |
+| `set_logger({"logger_name": "INFO"})` | set logger config directly.                                            |
+| `with master(mode="auto")`            | borrow removed `<master>` tag, for launching roscore remotely.         |
 
-source yaml files, resolved yaml file and ros parameter server can be synchronized dynamically.
-to use this function, user need to launch param_loader on launcher machine:
-```python
-with node(pkg="monolaunch", type="param_loader.py", ...):
-    pass
+
+you can pass `--dry-run` to only generate launch file, and launch it by yourself; this is useful for debug.
+the generated launch file includes all functionalities
+(auto-launch remote roscore, initial parameter resolving, remote resources synchronization, remote network settings, etc),
+and it can be moved to any location within the same machine.
+but some logic and parameters are decided at the generation phase, so it is recommended to run launch script everytimes.
+
+you don't need to configure network to run launch script or launch the generated launch file,
+all network settings are included in the generated launch file.
+you should leave `ROS_MASTER_URI` untouched and don't pass `--wait` by yourself.
+you should not pass launch file to roslaunch command via piping.
+
+## Why
+the purpose of launch file is providing a simple, direct and explicit way to manage nodes.
+it is barely programmable, and only supports simple branch and simple python expression evaluation.
+the benefit is clarity and simplicity, but it is insufficient to cope with increasingly complex tasks.
+
+ros2 provides a launch python library (and seems want to treat it as default),
+which is able to construct launch process directly, but it loses the simplicity and processes become unclear.
+there is no library in the middle, and it is not easy to migrate from simple launch file to complex roslaunch library.
+
+to keep up with increasing complexity, I have already push the programmability of launch files to its limit.
+launch file only allows simple python expression eval, where `__` is banned, and `globals()` is deleted.
+however, most of cases it is possible to squeeze logic into one line,
+and the safety guard for `__` are easily bypassed -- just write down expression in another arg tag,
+so that import is accessible:
+```xml
+<arg name="print_argv_expr" default="print(__import__('sys').argv)"/>
+<arg name="print_argv" default="$(eval eval(print_argv_expr))"/>
+```
+by the way, deleting `globals()` is completely useless.
+
+with this, we can even do some for-loop like operations, for example, remap variable number of topics:
+```xml
+<arg name="remap_args" default="$(eval ' '.join(
+    f'~input_{i}/image_raw:={topic}'
+    for i, topic in enumerate(topics.split(','))
+))"/>
+<node ... args="$(arg remap_args)"/>
 ```
 
-
-### Logger
-ros logging system of ROS compose of two parts: rosout mechanism and language specific API.
-
-rosout mechanism is simple, it is just a topic that accept logging messages.
-each logging message contain message content, location, level and node name (no logger name).
-but the functions to actually log messages differ from languages,
-they depend on logging system of each language:
-roscpp uses log4cxx, rospy uses native logging system.
-
-and that is a problem, because now we need multiple config files for different languages.
-lucky, log4cxx and python logging both use hierarchical logging framework,
-where the hierarchy of loggers allows child loggers to override configuration.
-
-for roscpp, full logger name of `ROS_XXX(...)` is `"ros.{package_name}"`,
-and `ROS_XXX_NAMED(...)` append another name after it;
-for rospy, full logger name is the `"rosout.{logger_name}"`,
-where `logger_name` is the argument in `rospy.logxxx(..., logger_name=...)`.
-(yes, it is inconsistent!)
-
-for example, `ROS_INFO("sth")` in package `planner` will log to `ros.planner`,
-and `ROS_INFO_NAMED("sub", "sth")` will log to `ros.planner.sub`;
-`rospy.loginfo("sth")` will log to `rosout`,
-and `rospy.loginfo("sth", logger_name="controller")` will log to `rosout.controller`,
-no matter what package it is in.
-(inconsistent again!)
-
-logger settings for API part can be setup by environment variables
-`ROSCONSOLE_CONFIG_FILE` and `ROS_PYTHON_LOG_CONFIG_FILE` initially,
-and there is no universal method for combining logger settings.
-because they only accept files, management is cumbersome in a multi-machine environment.
-
-we provide some methods to setup logger for both roscpp and rospy at once.
-the logger settings apply to all nodes in the scope,
-and can be partially overrided by logger settings in subscope.
-
-in above example, you can configure their logging levels by:
-```yaml
-ros.planner: DEBUG
-ros.planner.sub: DEBUG
-rosout.controller: DEBUG
+the normal ways to affect the control flow of a launch file are using environment variables and command arguments,
+but not yaml files, which are heavily used for controlling the behavior of nodes though.
+somethimes environment variables and arguments are needed for controlling nodes
+(ex. `ROSCONSOLE_CONFIG_FILE`, `static_transform_publisher` node),
+however, although environment variables and arguments can flow into rosparam,
+yaml files cannot be loaded as environment variables and arguments.
+so I abuse eval
+```xml
+<arg name="frame_id_expr" default="__import__('yaml').safe_load(open(config))"/>
+<arg name="frame_id" default="$(eval eval(frame_id_expr).get('frame_id', 'base_link'))"/>
 ```
-we will generate config files for each node and configure environment variables.
 
+even though, we sometimes need to write additional scripts to generate corresponding environment variables and yaml files.
+every time I modify related logic, I have to search for different files, and try to confirm that is the statement I have to adjust.
+the separation of logic causes a strong, inevitable coupling across different language.
 
-### Machine
-the original machanism of `<machine default="true">` simply sets to default globally,
-regardless of which scope/namespace/include it is located in
-(see: https://github.com/ros/ros_comm/issues/1884).
+the abuse of syntax and the separation of logic reveal that launching nodes is fundamentally not simple,
+it shouldn't be crammed into a non-programmable language, so I make monolaunch.
+making launch file programmable will definitely lose clarity.
+to get both simplicity and clarity, monolaunch just generate a launch file instead of launching nodes by myself.
+the basic structure is the same, almost every tag has a corresponding function.
+since python is programmable, you no longer need to worry about how to make the launch script complicated,
+keeping launch clear is now your responsibility.
 
-in monolaunch, you can use `with machine(...)` to set default machine **in this scope**.
-to specify the machine the node run on, just use it as context manager:
-```python
-with remote_machine:
-    with node(name="remote_node"):
-        pass
-```
-just like `<machine>` tag, you can call `machine(...)` with explicit arguments (user, password, address, env_loader),
-or use machine scheme url, which is in the form: `machine://usr:psd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2`.
+the central idea of monolaunch is to manage launch and configuration in _one_ file.
+when I say "one file," I mean that all related materials are linked through it,
+and all of them are located in their proper places.
+all launch logic are written in python, nice!
+all configurations can be put into yaml file, good!
+network settings can be separated from normal configuration, safest!
+all resources can be managed in local place, the best!
+in one word, monolaunch is pythonic: there should be one -- and preferably only one -- obvious way to do it.
 
-there are three roles for launching nodes on multiple machines: launcher, worker and master.
-they can locate in different machines, and require some environmental setups:
-- launcher:
-  `ROS_MASTER_URI` should be set, and it will be passed to the node process.
-  `ROS_IP` should be set, that is for launch server.
-- worker:
-  `ROS_IP` should be set, which is for advertising topics.
-  it should be setup by env_loader, invoked by roslaunch.
-- master:
-  `ROS_IP` should be set, which is for running roscore.
-  it must match the address of `ROS_MASTER_URI`.
+we also fix some weird behaviors about param/remap/machine, and add some additional functionalities,
+such as: launch-prefix written in python, native-like logger setting, remote network setup, remote roscore launch, etc.
 
-if `ROS_IP` is not set (`ROS_HOSNAME` will be used then) or `ROS_MASTER_URI` uses hostname,
-it is needed to setup `/etc/hosts` for all machines, so that they can find each other.
-the benefit of using `ROS_HOSTNAME` is that it is more robust to network changes.
-one can configure SSH keys for each workers in launcher's machine,
-so that no plain-text password is needed to provide to roslaunch.
+## How
+the following are some technical details of our implementation, which might not work for every versions of ros, it was only tested in ros-noetic.
 
-in general, `rosrun` just searches up and runs an executable, no matter whether it is a node.
-if it is a node and network settings (`ROS_IP` and `ROS_MASTER_URI`) are missing, it will use localhost by default.
-that is, if you just want to test your node locally,
-you only need to source your `devel/setup.bash`, no network setting is needed.
-but for running a multi-machine launch, network settings become necessary.
-you need to prepare additional setup files for setting up `ROS_IP` and `ROS_MASTER_URI`,
-and put user name/password/address/env loader path into corresponding machine tags,
-which is unpleasant.
+since monolaunch use python, it is no longer necessary to use the arg tag as a variable needed in most cases.
+all variables, branch and loop are evaluated at the generation phase.
 
-#### worker
+param/remap/env/machine tags use weird rules for nodes and includes in the scope.
+to fix, we collect all of them and manage by myself,
+now all nodes and includes are flatten, remap and env directly apply to each node,
+paramaters are collected into one file, machines are hoisted to the top level.
 
-to launch nodes remotely, one should write env-loader script on remote machine,
-which usually do: source setup script, setup `ROS_IP`.
-in the launch file, the env-loader attribute of corresponding machine tag is basically the absolute path to this file.
-the network configurations (`ROS_IP`) are scattered across multiple machines, which is inconvenient.
-luckly, env-loader scripts can be replaced by the trick: `bash -c '...' --`.
-we provide a simplified machine scheme url to solve this problem: `machine://usr@addr/path/to/devel/setup.bash?=setup`,
-where env-loader will be expanded to an inline bash script that source `/path/to/devel/setup.bash` and setup `ROS_IP`.
-on the worker machine, all you need to do is keep the builds in sync.
+we abuse `$(eval ...)` to do some complex works,
+it is possible because roslaunch fails to ban dunder and builtins
+(/opt/ros/noetic/lib/python3/dist-packages/roslaunch/substitution_args.py, line 298, 343).
+- call `monoparam.to_resolved` to resolve collected parameter file.
+  it returns resolved parameter file, and will be loaded via `<load_param>`.
+  note that arg evaluation happens before parameter loading, this should be fine.
+- call `monoresource.sync` to synchronize resources to each machines.
+  note that arg evaluation happens before launching nodes.
+- access filename of generated launch file:
+  launch file has `dirname` function but no `filename` function,
+  we steal variable `filename` from `dirname` function's closure context,
+  this may become invalid if implementation changed.
+- relaunch roslaunch with the same command prefixed with `with_roscore.py --filename <filename>`.
+  I have checked the source code of roslaunch, it should be fine for the latest version of ros-noetic.
 
-#### master
+to generate only one file, we embed collected parameters into xml plain text.
+the yaml content contains !include/!merge/!resource and need to be resolved,
+so it cannot be loaded directly.
+it is put inside the tag `<rosparam command="load" file="..." param="/">`,
+since it has `file` attribute, the inner text will be ignored.
 
-by default, roslaunch will start roscore automatically if roscore isn't open,
-but if ros master uri refer to a remote machine, roslaunch will wait for roscore.
-community says it is recommended to run roscore by yourself instead of relying on roslaunch.
-I think running roscore alongside with roslaunch is better than keeping roscore up,
-later one make previous parameters interfere with next run, causing awkward bugs.
-it would be convenient if it can launch roscore remotely,
-so we add master node to the launcher:
-```python
-with master_machine:
-    with master(): # roscore will be launched at master_machine
-        pass
-```
-it will be translated into `<master machine="..."/>`,
-which is a removed tag and will be skipped by roslaunch.
-we write a prefix script `with_roscore.py` for command `roslaunch generated_launcher.launch ...`,
-which will parse master tag and launch roscore remotely.
-normally it is impossible to launch roscore as a node from roslaunch itself,
-but I use an absurd technique to achieve it:
-just use `roslaunch` to launch generated launch file, it will be relaunched with prefix.
-note that the launch file must directly after `roslaunch`,
-and `ROS_MASTER_URI` must be unset/untouched/local,
-and roscore is not running.
+since `with_roscore.py` and `monoparam.to_resolved` will parse original roslaunch file,
+you cannot use piping to feed launch file: `roslaunch ... - < xxx.launch`.
 
-#### launcher
+we borrow the abandoned master tag for my auto-launch roscore mechanism.
+roslaunch will ignore the master tag; it is only used to provide information to `with_roscore.py`.
+technically, any unrecognized tag will be ignored.
 
-for two nodes with remote machine tags which only differ from env-loader,
-they will be prefixed with coorresponding env-loader.
-however, when the user and address of the machine of a node is equivalent to current user and localhost,
-it will be executed directly without prefixing with env-loader,
-otherwise it may cause some weird bugs due to the difference between composing commands and running commands.
-
-the awkward part is, we have to configure `ROS_IP`, `ROS_MASTER_URI` for launcher and local nodes,
-env-loader of machine scheme uri for local nodes just doesn't work.
-it is difficult to determine whether a machine tag is local at a glance,
-and configuring remote and local machine in different ways is dissatisfied.
-the best way is let launch file configure its machine setting inside itself, that is,
-parse desired machine tag from the launch file, and use it to run the launch file itself.
-for the launch file generated by monolaunch, `with_roscore.py` will parse local and master machine
-and run roscore and roslaunch with correct env-loader.
-
-however, it also affects how we generate launch file:
-generating launch file and running launch file should also be in the same environment.
-the best way still is let launcher generator configure its machine setting inside itself,
-but now it is too complicated to parse.
-
-in monolaunch, you need to put the machine context manager named local at the top scope:
-```python
-with machine(..., name="local"): # its address must be local
-    ... # all nodes should be put under it
-```
-which indicates the machine setting of the launcher itself,
-when the code execute to this line at the first time,
-it will abort and run again with correct env-loader.
-user should not put any branch and important operation before it.
-you don't need to setup network settings (`ROS_IP` and `ROS_MASTER_URI`) for running launcher script,
-they will be configured automatically according to the local machine you set.
-
-
-### Resource
-some ros packages, such as rviz marker, accept resource uri:
-`http://<link path>`, `package://<package name>/<relative path>` and `file://<absolute path>`.
-where file path is the local file path, which does not always work if node changes the place.
-roslaunch doesn't have proper resources management system, user should synchronize resource manually.
-technically, one can store/transfer files as binary data through ros parameter server, but it is not a good idea for large data.
-
-in monolaunch, you can use !resource to mark the string scalar as resource uri,
-and if it is local file, that is `file://<relative or absolute path>`,
-it will be synchronized to proper machine.
-or via
-```python
-set_param({
-    "my_resource": Path(my_resource_path), # Path object is recognized as !resource file://...
-})
-```
-the machine is determined by when it is loaded/set into monolaunch
-```python
-with machine_1:
-    set_param({"file": Path(file_path)})  # file will be synced to machine_1
-with machine_2:
-    load_param({"config": Link.parse(config_link)})  # resources in config_link will be synced to machine_2
-```
-they should be in put into private namespace of the node requires them.
-
-monoparam will translate them to resource uri, like `ros_home://<relative path to ROS_HOME>`,
-so to access those reosurces, just get the resolved resource uri from param server.
-
-resources are synchronized by monoresource, one can run it by yourself via
-`python -m monolaunch.monoresource <resolved param file>`.
-
-
-## monoparam
+the details will be documented in [mechanisms](mechanisms.md).
