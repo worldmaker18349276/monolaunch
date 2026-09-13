@@ -24,6 +24,7 @@ the loading of yaml files occurs during the launch phase.
 parameter resolving and resource synchronization run during launch phase,
 but before roscore is ready.
 
+
 ## Remap
 the original mechanism of `<remap>` is:
 - remap tags only affect contents after the tag, limited in the scope (launch, group, node),
@@ -470,5 +471,201 @@ to fix it, use `__import__` instead in this case.
 <!-- TODO: this should be our responsibility -->
 
 
-## Monoparam
+# Monoparam
+configurations are stored and managed as yaml files.
+yaml is just a human readable format of json object, but supports expandable tag semantics.
+you can use the `!include` tag to include multiple yaml files,
+which allows you to separate configurations and brings great benefits.
+`!merge` tag is also supported, so that one can overlay included yaml file instead of modifying it directly.
+it allows you to modify/extend part of existing configuration without touching it.
+to manage resources, we invent `!resource` tag, so that following url can be recognized and modified accordingly.
+
+## Include
+`!include` should be followed by the path of yaml file to be included.
+for example,
+
+base.yaml:
+```yaml
+a: 1
+b: 2
+```
+config.yaml:
+```yaml
+base: !include base.yaml
+```
+resolve to:
+```yaml
+base:
+  a: 1
+  b: 2
+```
+where the path can be an absolute path or a path relative to the file containing the statement.
+it also can be a json pointer
+```yaml
+base: !include base.yaml#/key/2/item
+```
+where string `key` and `item` represent map access, number `2` represents sequence access.
+there are some limit on pointer:
+- key of map cannot be a string that look like number, otherwise it will be confused in pointer.
+- key of map cannot be empty, which is unrepresentable in pointer: `/a//b` is the same as `/a/b`.
+- key of map cannot contain letter '/' and '#'.
+- key can contain spaces or newlines, but please don't.
+
+the functionality of `!include` allows you to manage configuration structurally.
+our recommended design is:
+separate configurations by purpose, and `!include` all configurations into one yaml file.
+let the entry point of launch script only accept that file as input,
+launch script then distributes each part to private namespace of each node.
+monolaunch will resolve all redistributed configurations into another yaml file.
+
+the advantages of this design are obvious:
+- smaller configuration files are more readable and reusable
+- single input yaml file is easy to manage, single resolved yaml file is easy to debug
+- configurations should be separated based on purpose (single responsibility principle)
+- separation of user configurations and launcher configurations  
+  the reason for designing user configurations first and then redistributing them to establish launcher configurations,
+  rather than directly asking users to provide launcher configurations, is because:
+  - launcher configurations are usually not suitable for user.
+  - the nested structure of launcher configurations is related to the implementation of the launcher,
+    which is not an issue that users should care about.
+  - redistribution makes single source of truth possible.
+
+based on purposes, configurations can be categorized into:
+- calibration data:  
+  the calibration of sensors, such as intrinsics/extriniscs of stereo camera, imu-cam extrinsics,
+  should remain unchanged unless the mechanical structures or internal components change.
+  also calibration data are usually produced by another program,
+  which should be managed in a separated directory,
+  instead of manually copying into your configuration file.
+- algorithm parameters:  
+  algorithms typically contain many parameters (such as PID, resolution, fps, etc)
+  that need to be adjusted depending on the specific circumstances.
+  tuning parameters often require some relevant knowledge, which frontend users cannot master.
+  you also don't want to touch it once it's tuned to the optimal state.
+  separating them from other configurations can also hide their complexity.
+  aside from their purposes, the algorithm parameters are similar to calibration data;
+  the only difference is whether there is a systematic method to determining these parameters.
+- feature settings:  
+  these are about general settings of features, such as use which algorithm,
+  connect to which sensors, frame ID name, publish to which topics,
+  delay time of some operations, etc.
+  they usually can be configured by strings or integers, which are easy to adjust for frontend users.
+- environmental settings:  
+  some configurations are necessarily related to the machine/device you are using,
+  and cannot be ported to the same application on different machines.
+  such as network/authentication settings, sensor's device ID, buildspace path, etc.
+
+
+## Merge
+`!merge` should be followed by the sequence of objects to be merged.
+for example,
+```yaml
+config: !merge
+  - timeout: 10
+    retries: 3
+  - timeout: 30
+```
+resolve to:
+```yaml
+config:
+  timeout: 30
+  retries: 3
+```
+rules are simple:
+- null <> any = any <> null = any   --  null behaves like empty slot
+- scalar <> scalar = later one
+- seq <> seq = zip longest with <>
+- map <> map = union zip with <>
+- non-null type <> another non-null type = later one
+
+command `rosparam load` also has merging behavior, but it is slightly different from !merge.
+rosparam cannot access sequence through index, even if sequence contain more than just scalars.
+similarly, rosparam treats sequence as a scalar during merge; it just replaces all contents of sequence.
+I think rosparam's seq merging rule is better for configuration,
+but I stick to current rule for now since it is more symmetrical.
+
+in our context, `!merge` is used for modifying/extending part of existing configuration without touching original file,
+but not any kind of modification can be done via `!merge`.
+I think they are the best solution at present.
+
+due to the merging rule, you should not put different type of configuration into the same field,
+it will be messed up badly after merging.
+you should mimic sum type with product type:
+```yaml
+flag: "real_camera"
+real_camera: {...}
+virtual_camera: null
+```
+
+merging variable-sized sequence not always make sense.
+for example, merging set of flags:
+```yaml
+!merge
+- flags: ["flag1", "flag2"] # turn on flag1 and flag2
+- flags: ["flag4"] # turn on flag4
+```
+doesn't resolve to
+```yaml
+flags: ["flag1", "flag2", "flag4"] # union
+```
+or
+```yaml
+flags: ["flag4"] # override
+```
+but get
+```yaml
+flags: ["flag4", "flag2"]
+```
+the merging rule doesn't make sense here:
+the position of an element is meaningless, but it will affect the merge result.
+thus, additive set of items cannot be represented under this merging rules.
+for rosparam's merging rule, additive behavior still cannot be made,
+but overriding full set does make sense in another aspect.
+
+similarly, it also doesn't make sense for sequence that represents order:
+```yaml
+!merge
+- stereo_depth:
+    filter_order: ["decimate", "median", "bilateral"]
+    ...
+- stereo_depth:
+    filter_order: ["bilateral", "decimate"]
+    ...
+```
+however, this is fine for rosparam's merging rule.
+
+another example, assume you have a set of cameras, which have configurations stored as a sequence
+```yaml
+- fov: 60
+  resolution: [640, 640]
+  fps: 30
+  type: "mono"
+- fov: 57
+  resolution: [320, 320]
+  fps: 60
+  type: "stereo"
+```
+under our merging rules, it is impossible to remove one of camera, or replace both completely to single camera.
+if you use rosparam merging rules, now the problem becomes you cannot override single property of one of camera.
+in this case, sequence is a bad design, you should use map instead, so that each camera can be referenced correctly.
+
+a good design principle is: don't use sequence in configuration, always use map.
+if you must use seq, then only include scalars.
+for vector, use `{x: 1, y: 2, z: 3}`;
+for quaternion, use `{x: 1, y: 2, z: 3, w: 4}`;
+for set of cameras, use `{cam0: ..., cam1: ...}`.
+the only exception is matrix: `[[1, 0], [0, 1]]`.
+
+even if we cannot change merging rule for vector, quaternion or somthing that should be treated as scalar,
+as long as types are matched, their values will be merged correctly.
+
+## Resource
+...
+
+
+## Context
+...
+
+
+## Schema
 ...
