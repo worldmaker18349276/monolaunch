@@ -13,7 +13,16 @@ launch script has two phases: generation phase and launch phase:
   - synchronize resources
   - launch nodes
 
-you can use `--dry-run (1|2|3)` to run until: generate launch file; resolved parameters; synchronize resources.
+you can use `--dry-run (1|2|3)` to run until generating launch file/resolving parameters/synchronizing resources.
+
+keep in mind that this is just a launch file generator,
+you are constructing a launch file, not launching nodes directly.
+only few operations are done during the launch phase:
+`load_param`/`load_logger` only setup which file will be loaded,
+the loading of yaml files occurs during the launch phase.
+`launch_prefix` will be executed right before launching node.
+parameter resolving and resource synchronization run during launch phase,
+but before roscore is ready.
 
 ## Remap
 the original mechanism of `<remap>` is:
@@ -414,6 +423,51 @@ so to access those reosurces, just get the resolved resource uri from param serv
 
 resources are synchronized by monoresource, one can run it by yourself via
 `python -m monolaunch.monoresource <resolved param file>#/$sync_resources`.
+
+
+## Launch Prefix
+a node process accepts four types of inputs: environmental variables, command arguments, ros parameters and files.
+for roslaunch, they can be set by `<env>` tag, `args` attribute of `<node>` tag, `<param>` or `<rosparam>` tag, and resource uri.
+launch environmental variables and launch arguments can flow into env/args/param easily,
+but values in yaml files cannot flow into env/args directly.
+in monolaunch, it is possible via `get_value`, the value will be read during the generation phase.
+`load_param` will load yaml file directly, so you can change your yaml file freely.
+but `set_param` set parameters during the generation phase, the value will not change if you don't generate again.
+
+things get more complicated when files are involved.
+as long as param contains resource paths, monoparam and monoresource will synchronize it to proper place.
+but it does not work for env/args (for example, `ROSCONSOLE_CONFIG_FILE`, `rviz -d <config.rviz>`).
+if you obtain path via `get_value` and set to env/args,
+because it is done during the generation phase, resource uri is not resolved (`file://...` haven't be resolved to `ros_home://...`).
+in this case, the best timing to setup env/args is right before launching the node, that is, by launch-prefix.
+logger configuration settings are also done in this way.
+
+writting launch-prefix script for each case and managing them accross machines are tedious,
+so we provide a decorator to let you write launch prefix in python:
+```python
+@launch_prefix
+def rviz_init(ns, delay):
+    import rospy
+    import os
+    import sys
+    import time
+    rviz_config = rospy.get_param(f"{ns}/rviz_config") # you can read parameters
+    rosconsole_config = rospy.get_param(f"{ns}/rosconsole_config")
+    assert sys.argv[0] == "/opt/ros/noetic/lib/rviz"
+    sys.argv[1:1] = ["-d", str(rviz_config)] # you can modify command arguments
+    os.environ["ROSCONSOLE_CONFIG_FILE"] = str(rosconsole_config) # you can change environment variables
+    time.sleep(float(delay)) # you can wait
+
+with node(name="rviz", pkg="rviz", type="rviz", launch_prefix=rviz_init(ns(), str(1.5))):
+    pass
+```
+the source code will be transferred and executed on the machine of the node,
+so launch-prefix function cannot be a closure,
+arguments cannot have defaults (it may refer to outer variable),
+and can only accept string arguments (arguments are also need to be transferred).
+if a module has been imported globally, it will be captured and become a closure.
+to fix it, use `__import__` instead in this case.
+<!-- TODO: this should be our responsibility -->
 
 
 ## Monoparam

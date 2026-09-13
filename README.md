@@ -139,12 +139,10 @@ the basic structure is the same, almost every tag has a corresponding function:
 | `set_logger({"logger_name": "INFO"})` | set logger config directly.                                            |
 | `with master(mode="auto")`            | borrow removed `<master>` tag, for launching roscore remotely.         |
 
-
-you can pass `--dry-run` to only generate launch file, and launch it by yourself; this is useful for debug.
 the generated launch file includes all functionalities
 (auto-launch remote roscore, initial parameter resolving, remote resources synchronization, remote network settings, etc),
 and it can be moved to any location within the same machine.
-but some logic and parameters are decided at the generation phase, so it is recommended to run launch script everytimes.
+it is recommended to run launch script everytimes.
 
 you don't need to configure network to run launch script or launch the generated launch file,
 all network settings are included in the generated launch file.
@@ -220,7 +218,7 @@ such as: launch-prefix written in python, native-like logger setting, remote net
 the following are some technical details of our implementation, which might not work for every versions of ros, it was only tested in ros-noetic.
 
 since monolaunch use python, it is no longer necessary to use the arg tag as a variable needed in most cases.
-all variables, branch and loop are evaluated at the generation phase.
+all variables, branch and loop are evaluated during the generation phase.
 
 param/remap/env/machine tags use weird rules for nodes and includes in the scope.
 to fix, we collect all of them and manage by myself,
