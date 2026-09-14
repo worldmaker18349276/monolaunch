@@ -253,6 +253,7 @@ we use invalid `<node>` tag to raise error conditionally:
 ```xml
 <group if="$(eval ...)">
   <node error="..."/>
+  <!-- fail with: RLException: <node> tag is missing required attribute: 'name'. Node xml is <node error="..."/> -->
 </group>
 ```
 it utilizes the way roslaunch resolves tags: it only checks if a tag is valid after it enters this branch.

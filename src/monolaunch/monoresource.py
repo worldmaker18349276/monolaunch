@@ -14,18 +14,11 @@ import socket
 
 from typing import List, Sequence, Tuple
 import urllib.parse
-from monolaunch.yaml_utils import FieldAccessError, assert_JSON, Link, load_YAML
+from monolaunch.yaml_utils import FieldAccessError, assert_JSON, PathWithJPointer, load_YAML, urlquote
 
 # TODO: typecheck user input
 
 IP_REGEX = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
-
-def urlquote(s: str, unsafe: str = r"%#@/:;?") -> str:
-    return re.sub(
-        f"[{re.escape(unsafe)}]",
-        lambda m: ''.join(f"%{b:02X}" for b in m.group(0).encode("utf-8")),
-        s,
-    )
 
 class SchemeParseError(Exception):
     def __init__(self, scheme: str, url: str, format: str = ""):
@@ -66,21 +59,25 @@ class Machine:
             env_loader = (env_loader_cmd, *env_loader_args)
         
             if ("", "setup") in query:
-                if IP_REGEX.match(address):
-                    setenv = shlex.quote(f"ROS_IP={address}")
-                else:
-                    setenv = shlex.quote(f"ROS_HOSTNAME={address}")
-                setup_bash = shlex.quote(env_loader[0])
-                env_loader = (
-                    "/usr/bin/bash",
-                    "-c",
-                    f'source {setup_bash} && {setenv} exec "$@"',
-                    "--",
-                )
+                env_loader = Machine._from_setup_script(address, env_loader[0])
         else:
             env_loader = ()
 
         return Machine(user=user, password=password, address=address, env_loader=env_loader)
+
+    @staticmethod
+    def _from_setup_script(address: str, setup_script: str) -> Tuple[str, ...]:
+        if IP_REGEX.match(address):
+            setenv = shlex.quote(f"ROS_IP={address}")
+        else:
+            setenv = shlex.quote(f"ROS_HOSTNAME={address}")
+        setup_bash = shlex.quote(setup_script)
+        return (
+            "/usr/bin/bash",
+            "-c",
+            f'source {setup_bash} && {setenv} exec "$@"',
+            "--",
+        )
     
     def reduce_local(self) -> "Machine":
         if self.is_local():
@@ -88,17 +85,35 @@ class Machine:
         return self
 
     def get_netloc(self) -> str:
-        netloc = self.address
+        netloc = urlquote(self.address, unsafe="/@:")
         if self.user:
-            auth = urlquote(self.user, unsafe="%@:")
+            auth = urlquote(self.user, unsafe="/:")
             if self.password:
-                auth += ":" + urlquote(self.password, unsafe="%@:")
+                auth += ":" + urlquote(self.password, unsafe="/")
             netloc = auth + "@" + netloc
         return netloc
 
+    def _get_setup_script(self) -> str:
+        if not (len(self.env_loader) == 4 and self.env_loader[0] == "/usr/bin/bash" and self.env_loader[1] == "-c" and self.env_loader[3] == "--"):
+            return ""
+
+        if IP_REGEX.match(self.address):
+            setenv = shlex.quote(f"ROS_IP={self.address}")
+        else:
+            setenv = shlex.quote(f"ROS_HOSTNAME={self.address}")
+        parts = shlex.split(self.env_loader[2])
+        if not (len(parts) == 6 and parts[0] == "source" and parts[2:] == ["&&", setenv, "exec", "$@"]):
+            return ""
+        return parts[1]
+    
     def __str__(self) -> str:
+        if setup_script := self._get_setup_script():
+            path = urlquote(setup_script, unsafe="#?")
+            args = urllib.parse.urlencode([("", "setup")])
+            return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", args, ""))
+
         cmd, *args = self.env_loader or ("",)
-        path = urlquote(cmd, unsafe="%;#?")
+        path = urlquote(cmd, unsafe="#?")
         args = urllib.parse.urlencode([("arg", arg) for arg in args])
         return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", args, ""))
 
@@ -109,11 +124,11 @@ class Machine:
             machine_ips = [host[4][0] for host in socket.getaddrinfo(self.address, 0, 0, 0, socket.SOL_TCP) if isinstance(host[4][0], str)]
         except socket.gaierror:
             raise ValueError(f"cannot resolve host address for machine [{self.address}]")
-        import rosgraph.network # pyright: ignore[reportMissingImports]
-        local_addresses = ['localhost'] + rosgraph.network.get_local_addresses() # type: ignore
+        import rosgraph.network
+        local_addresses = ['localhost'] + rosgraph.network.get_local_addresses()
         # check 127/8 and local addresses
         is_local = ([ip for ip in machine_ips if (ip.startswith('127.') or ip == '::1')] != [])
-        is_local = is_local or (set(machine_ips) & set(local_addresses) != set()) # pyright: ignore[reportUnknownArgumentType]
+        is_local = is_local or (set(machine_ips) & set(local_addresses) != set())
 
         #491: override local to be ssh if machine.user != local user
         if is_local and self.user:
@@ -194,7 +209,7 @@ class SyncInfo:
     check_only: bool
 
     @staticmethod
-    def load_list(params_link: Link) -> List["SyncInfo"]:
+    def load_list(params_link: PathWithJPointer) -> List["SyncInfo"]:
         try:
             params = assert_JSON(load_YAML(params_link))
         except FieldAccessError as e:
@@ -240,7 +255,7 @@ def sync(params_link: str):
     ```
     """
     print(f"sync resources: {params_link}")
-    for info in SyncInfo.load_list(Link.parse(params_link)):
+    for info in SyncInfo.load_list(PathWithJPointer.parse(params_link)):
         machine = Machine.parse(info.machine)
         machine = machine.reduce_local()
 

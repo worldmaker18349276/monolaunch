@@ -19,7 +19,7 @@ import re
 import traceback
 import warnings
 import xml.etree.ElementTree as ET
-from typing import Any, Callable, Dict, KeysView, List, Literal, Optional, Tuple, Sequence, Union, overload
+from typing import Any, Callable, Dict, KeysView, List, Literal, Optional, Tuple, Sequence, Type, TypeVar, Union, cast, overload, Protocol, runtime_checkable
 from pathlib import Path
 from dataclasses import MISSING, dataclass, field
 from collections import ChainMap
@@ -28,7 +28,7 @@ import os
 import shlex
 from uuid import uuid4
 import yaml
-from monolaunch.yaml_utils import JSON, FieldAccessError, FieldPath, Link
+from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, PathWithJPointer
 from . import monoparam
 from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
@@ -87,7 +87,7 @@ class Scope:
     default_machine: Optional["MachineCtx"] = None
     remap: Dict[str, str] = field(default_factory=lambda: {})
     env: Dict[str, str] = field(default_factory=lambda: {})
-    logger: List[Union[Link, LoggerConfig]] = field(default_factory=lambda: [])
+    logger: List[Union[PathWithJPointer, LoggerConfig]] = field(default_factory=lambda: [])
 
 @dataclass
 class Ctx:
@@ -177,16 +177,16 @@ class Ctx:
         if not isinstance(param, dict):
             raise TypeError("param should be a dictionary")
 
-        param = {
+        param = cast(Union[JSONWithPath, JSONWithOnlyLink], {
             self.resolve_name(key): value
             for key, value in param.items()
-        } # type: ignore
+        })
 
         if is_load:
             for _path, value in JSONLike_deep_iter(param):
                 if isinstance(value, (str, Path)):
                     is_absolute = Path(value).is_absolute()
-                elif isinstance(value, Link):
+                elif isinstance(value, PathWithJPointer):
                     is_absolute = value.filepath.is_absolute()
                 else:
                     is_absolute = False
@@ -197,11 +197,11 @@ class Ctx:
             self.param_node = self.param_loader.new(self.params_filepath)
         assert self.param_node is not None
         if is_load:
-            self.param_loader.include(self.param_node, param, str(machine)) # type: ignore
+            self.param_loader.include(self.param_node, cast(JSONWithOnlyLink, param), str(machine))
         else:
-            self.param_loader.update(self.param_node, param, str(machine)) # type: ignore
+            self.param_loader.update(self.param_node, cast(JSONWithPath, param), str(machine))
 
-    def get_value(self, link: Link) -> JSON:
+    def get_value(self, link: PathWithJPointer) -> JSON:
         if not link.filepath.is_absolute():
             raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link}, you may want to use dirname()")
         tmp_param_node, _depends = self.param_loader.load(link)
@@ -273,7 +273,7 @@ class Ctx:
         return merged
 
     # logger
-    def load_logger(self, link: Link):
+    def load_logger(self, link: PathWithJPointer):
         if not self.scopes:
             raise NoTopLevelScopeError()
         self.scopes[-1].logger.append(link)
@@ -290,11 +290,10 @@ class Ctx:
         if not configs: return False
         
         for config in configs:
-            if isinstance(config, Link):
+            if isinstance(config, PathWithJPointer):
                 self.load_param({"~$ros_logger_config": config})
             else:
-                config_: JSONWithPath = config # pyright: ignore[reportAssignmentType]
-                self.set_param({"~$ros_logger_config": config_})
+                self.set_param({"~$ros_logger_config": cast(JSONWithPath, config)})
 
         return True
 
@@ -539,8 +538,8 @@ def env(name: str, fallback: Optional[str] = None) -> str:
     return value
 
 def find(pkg: str) -> str:
-    import rospkg # type: ignore
-    return rospkg.RosPack().get_path(pkg) # type: ignore
+    import rospkg
+    return rospkg.RosPack().get_path(pkg) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
 
 def sanitize_identifier(name: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
@@ -552,7 +551,7 @@ def anon(name: str) -> str:
     return name + "_" + str(uuid4()).replace("-", "_")
 
 class LinkAccessTypeWarning(Warning):
-    def __init__(self, value_link: Link, value_type: type, expected_type: type):
+    def __init__(self, value_link: PathWithJPointer, value_type: type, expected_type: type):
         self.value_link = value_link
         self.value_type = value_type
         self.expected_type = expected_type
@@ -563,54 +562,71 @@ class LinkAccessTypeWarning(Warning):
             f" doesn't match expected type {self.expected_type.__name__}"
         )
 
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]]) -> JSON: ...
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: None) -> None: ...
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: bool) -> bool: ...
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: int) -> int: ...
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: float) -> float: ...
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: str) -> str: ...
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: List[JSON]) -> List[JSON]: ...
-@overload
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: Dict[str, JSON]) -> Dict[str, JSON]: ...
+FromJsonSelf = TypeVar("FromJsonSelf", bound="FromJson")
+@runtime_checkable
+class FromJson(Protocol):
+    @classmethod
+    def from_json(cls: Type[FromJsonSelf], data: JSON) -> FromJsonSelf:
+        """
+        construct dataclass from json in depth, use default value if fails.
+        """
+        ...
 
-def get_value(field_or_path: Union[str, Path, Link, Tuple[JSON, Union[str, FieldPath]]], fallback: JSON = MISSING) -> JSON: # type: ignore
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]]) -> JSON: ...
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: None) -> None: ...
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: bool) -> bool: ...
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: int) -> int: ...
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: float) -> float: ...
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: str) -> str: ...
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: List[JSON]) -> List[JSON]: ...
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: Dict[str, JSON]) -> Dict[str, JSON]: ...
+FromJsonT = TypeVar("FromJsonT", bound="FromJson")
+@overload
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: FromJsonT) -> FromJsonT: ...
+
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: JSON = MISSING) -> JSON: # pyright: ignore[reportInconsistentOverload, reportArgumentType]
     if not isinstance(field_or_path, tuple):
-        if isinstance(field_or_path, Link):
+        if isinstance(field_or_path, PathWithJPointer):
             link = field_or_path
         elif isinstance(field_or_path, Path):
-            link = Link(field_or_path)
+            link = PathWithJPointer(field_or_path)
         else:
-            link = Link.parse(field_or_path)
+            link = PathWithJPointer.parse(field_or_path)
 
         get_value_ = lambda: ctx().get_value(link)
 
     else:
-        if isinstance(field_or_path[1], FieldPath):
+        if isinstance(field_or_path[1], JPointer):
             fieldpath = field_or_path[1]
         else:
-            fieldpath = FieldPath.parse(field_or_path[1])
-        link = Link(Path("<python object>"), fieldpath)
+            fieldpath = JPointer.parse(field_or_path[1])
+        link = PathWithJPointer(Path("<python object>"), fieldpath)
 
         get_value_ = lambda: fieldpath.walk(field_or_path[0])
 
-    if fallback is MISSING: # type: ignore
+    if fallback is MISSING: # pyright: ignore[reportUnnecessaryComparison]
         return get_value_()
 
     try:
         res = get_value_()
     except FieldAccessError as err:
-        warnings.warn(LinkAccessWarning(Link(link.filepath, err.path)))
+        warnings.warn(LinkAccessWarning(PathWithJPointer(link.filepath, err.path)))
         res = None
 
+    if isinstance(fallback, FromJson):
+        res = fallback.from_json(res)
+        return res
+
     if not isinstance(res, type(fallback)):
-        warnings.warn(LinkAccessTypeWarning(link, type(res), type(fallback))) # type: ignore
+        warnings.warn(LinkAccessTypeWarning(link, type(res), type(fallback)))
         res = fallback
     return res
 
@@ -623,7 +639,8 @@ _ctx: Optional[Ctx] = None
 
 def ctx() -> Ctx:
     global _ctx
-    return _ctx # type: ignore
+    assert _ctx is not None
+    return _ctx
 
 @contextlib.contextmanager
 def _with_ctx():
@@ -641,7 +658,12 @@ def ns(n: Literal["", "~"] = "") -> str:
         return _join_ns(ctx().ns)
 
 def dirname() -> Path:
-    return Path(inspect.currentframe().f_back.f_globals["__file__"]).parent.resolve() # type: ignore
+    currentframe = inspect.currentframe()
+    assert currentframe is not None
+    f_back = currentframe.f_back
+    assert f_back is not None
+    file = f_back.f_globals["__file__"]
+    return Path(file).parent.resolve()
 
 class UncopyableFunctionWarning(Warning):
     def __init__(self, func_name: str):
@@ -766,19 +788,19 @@ def resolve_logger_config(logger_config: JSON) -> LoggerConfig:
     for level in logger_config.values():
         if level not in ("DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
             raise TypeError(f"expect 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL', got {level}")
-    return logger_config # pyright: ignore[reportReturnType]
+    return cast(LoggerConfig, logger_config)
 
-def load_logger(config_link: Union[str, Path, Link]) -> None:
+def load_logger(config_link: Union[str, Path, PathWithJPointer]) -> None:
     """
     load ros logger config in a scope (apply to nodes in the scope).
     
     about config format, see `set_logger`.
     """
     if isinstance(config_link, str):
-        config_link = Link.parse(config_link)
+        config_link = PathWithJPointer.parse(config_link)
     elif isinstance(config_link, Path):
-        config_link = Link(config_link)
-    elif isinstance(config_link, Link): # pyright: ignore[reportUnnecessaryIsInstance]
+        config_link = PathWithJPointer(config_link)
+    elif isinstance(config_link, PathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
         config_link = config_link
     else:
         raise TypeError
@@ -791,7 +813,7 @@ def set_logger(config: Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATA
 
     `config` is a map from logger name to logging level (DEBUG, INFO, WARN, ERROR, FATAL).
     """
-    config = resolve_logger_config(config) # pyright: ignore[reportArgumentType]
+    config = resolve_logger_config(cast(JSON, config))
     ctx().set_logger(config)
 
 class ForeignSyncResourceWarning(Warning):
@@ -817,7 +839,7 @@ def check_foreign_sync_resources(ctx: Ctx):
             if isinstance(value, (monoparam.Include, monoparam.Resource)):
                 runtime_machine = dict(value.context).get("runtime_machine")
                 runtime_machine_key = MachineCtx.parse(runtime_machine).machine if runtime_machine is not None else None
-                host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and FieldPath((*node.ns, node.name)).is_prefix(path)), None)
+                host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and JPointer((*node.ns, node.name)).is_prefix(path)), None)
                 host_machine_key = host_node.machine.machine if host_node is not None and host_node.machine is not None else None
                 if host_machine_key != runtime_machine_key:
                     resource_name = f"!include {value.link}" if isinstance(value, monoparam.Include) else value.uri
@@ -892,7 +914,7 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
 
         # dry_run == 1
         dry_run_1 = ET.Element("group", {"if": "$(eval dry_run == 1)"})
-        dry_run_1.append(ET.Element("node", dict(name="error", default="stop launch because dry_run == 1")))
+        dry_run_1.append(ET.Element("node", dict(error="stop launch because dry_run == 1")))
         launch_el.append(dry_run_1)
 
         # extract filename
@@ -920,7 +942,7 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
 
             # dry_run == 2
             dry_run_2 = ET.Element("group", {"if": "$(eval dry_run == 2)"})
-            dry_run_2.append(ET.Element("node", dict(name="error", default="run until resolving param because dry_run == 2")))
+            dry_run_2.append(ET.Element("node", dict(error="run until resolving param because dry_run == 2")))
             launch_el.append(dry_run_2)
 
             # add resource loader
@@ -930,7 +952,7 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
 
             # dry_run == 3
             dry_run_3 = ET.Element("group", {"if": "$(eval dry_run == 3)"})
-            dry_run_3.append(ET.Element("node", dict(name="error", default="run until sync resources because dry_run == 3")))
+            dry_run_3.append(ET.Element("node", dict(error="run until sync resources because dry_run == 3")))
             launch_el.append(dry_run_3)
         
         # add <machine>

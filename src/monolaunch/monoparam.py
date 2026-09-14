@@ -36,7 +36,7 @@ changing one YAML file on each side will cause the other YAML file to be updated
 from enum import Enum
 from inspect import cleandoc
 from uuid import uuid4
-from typing import Any, Dict, Generator, List, Literal, Tuple, Set, Union, Optional, Type, TypeVar, Callable, IO, overload
+from typing import Any, Dict, Generator, List, Literal, Tuple, Set, Union, Optional, Type, TypeVar, Callable, IO, cast, overload
 import sys
 import math
 import yaml
@@ -46,6 +46,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 import warnings
 from monolaunch.yaml_utils import *
+from monolaunch.yaml_utils import urlquote
 
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -57,20 +58,23 @@ def raises(*exceptions: Type[BaseException]):
 
 # JSON + Path
 JSONWithPath = Union[None, JSON, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
-# JSON but only Path/Link as scalar
-JSONWithOnlyLink = Union[None, str, Path, "Link", List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
+# JSON but only Path/PathWithJPointer as scalar
+JSONWithOnlyLink = Union[None, str, Path, PathWithJPointer, List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
+
+def parse_rosparam_path(path: str) -> Tuple[str, ...]:
+    return tuple(e for e in path.strip("/").split("/") if e)
 
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple["FieldPath", Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
+def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple[JPointer, Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple["FieldPath", Union[str, Path, "Link"]], None, None]: ...
-def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple["FieldPath", JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
-    stack = [(FieldPath(), folded_dict)]
+def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JPointer, Union[str, Path, PathWithJPointer]], None, None]: ...
+def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JPointer, JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
+    stack = [(JPointer(), folded_dict)]
     while stack:
         path, value = stack.pop()
         if isinstance(value, dict):
             for subpath in list(value.keys()):
-                stack.append((path.extend(FieldPath.parse(subpath)), value[subpath]))
+                stack.append((path.extend(JPointer(parse_rosparam_path(subpath))), value[subpath]))
         elif isinstance(value, list):
             for key in range(len(value)):
                 stack.append((path.append(key), value[key]))
@@ -99,9 +103,9 @@ def is_SourcedJSON(data: Any) -> bool:
     if type(data) in (type(None), bool, int, float, str, Resource):
         return True
     elif type(data) == list:
-        return all(is_SourcedJSON(e) for e in data) # type: ignore
+        return all(is_SourcedJSON(e) for e in cast(List[Any], data))
     elif type(data) == dict:
-        return all(type(k) == str and is_SourcedJSON(v) for k, v in data.items()) # type: ignore
+        return all(type(k) == str and is_SourcedJSON(v) for k, v in cast(Dict[Any, Any], data).items())
     elif type(data) == Merge:
         return all(is_SourcedJSON(e) for e in data.items)
     else:
@@ -112,7 +116,7 @@ def assert_SourcedJSON(data: Any) -> SourcedJSON:
         raise TypeError(f"not sourced json: {data}")
     return data
 
-def as_SourcedJSON(data: JSON) -> SourcedJSON: return data # type: ignore
+def as_SourcedJSON(data: JSON) -> SourcedJSON: return cast(SourcedJSON, data)
 
 
 def SourcedJSON_deep_copy(obj: SourcedJSON) -> SourcedJSON:
@@ -164,15 +168,15 @@ def SourcedJSON_deep_eq(a: SourcedJSON, b: SourcedJSON) -> bool:
 
     return True
 
-def SourcedJSON_deep_diff(old: SourcedJSON, new: SourcedJSON) -> Dict["FieldPath", Optional[SourcedJSON]]:
+def SourcedJSON_deep_diff(old: SourcedJSON, new: SourcedJSON) -> Dict[JPointer, Optional[SourcedJSON]]:
     """
     diff in the scalar level, will consider tags (!resource, !include, !merge).
     keys of resulting dictionary are paths in raw sourced json, not resolved one.
     this is for updating yaml file.
     """
-    updated: Dict[FieldPath, Optional[SourcedJSON]] = {}
+    updated: Dict[JPointer, Optional[SourcedJSON]] = {}
 
-    stack: List[Tuple[FieldPath, SourcedJSON, SourcedJSON]] = [(FieldPath(), old, new)]
+    stack: List[Tuple[JPointer, SourcedJSON, SourcedJSON]] = [(JPointer(), old, new)]
     while stack:
         path, a, b = stack.pop()
 
@@ -214,11 +218,11 @@ def SourcedJSON_deep_diff(old: SourcedJSON, new: SourcedJSON) -> Dict["FieldPath
 
     return updated
 
-def SourcedJSON_deep_iter(obj: SourcedJSON) -> Generator[Tuple["FieldPath", "FieldPath", Union[bool, int, float, str, "Resource", "Include"]], None, None]:
+def SourcedJSON_deep_iter(obj: SourcedJSON) -> Generator[Tuple[JPointer, JPointer, Union[bool, int, float, str, "Resource", "Include"]], None, None]:
     """
     two paths are raw field path and resolved path
     """
-    stack = [(FieldPath(), FieldPath(), obj)]
+    stack = [(JPointer(), JPointer(), obj)]
     while stack:
         raw_path, path, value = stack.pop()
         if isinstance(value, dict):
@@ -248,6 +252,19 @@ class InvalidUriError(Exception):
     def __str__(self) -> str:
         return f"unknown URI: {self.uri}"
 
+def ros_home() -> str:
+    import rospkg
+    return rospkg.get_ros_home() # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+def find_pkg(package_name: str) -> str:
+    import rospkg
+    try:
+        package_path = rospkg.RosPack().get_path(package_name) # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    except Exception as e:
+        raise RosPackageNotFoundError(package_name) from e
+    assert isinstance(package_path, str)
+    return package_path
+
 @raises(RosPackageNotFoundError, InvalidUriError)
 def retrieve_resource(uri: str) -> Path:
     """
@@ -263,22 +280,11 @@ def retrieve_resource(uri: str) -> Path:
     elif uri.startswith("package://"):
         path = uri[len("package://"):]
         package_name, path = [*path.split("/", 1), ""][:2]
-
-        import rospkg # type: ignore
-        try:
-            package_path = rospkg.RosPack().get_path(package_name) # type: ignore
-        except Exception as e:
-            raise RosPackageNotFoundError(package_name) from e
-        assert isinstance(package_path, str)
-        return Path(package_path + "/" + path).resolve()
+        return Path(find_pkg(package_name) + "/" + path).resolve()
 
     elif uri.startswith("ros_home://"):
         path = uri[len("ros_home://"):]
-
-        import rospkg # type: ignore
-        ros_home = rospkg.get_ros_home() # type: ignore
-        assert isinstance(ros_home, str)
-        return Path(ros_home + "/" + path).resolve()
+        return Path(ros_home() + "/" + path).resolve()
 
     else:
         raise InvalidUriError(uri)
@@ -304,6 +310,7 @@ class Resource:
 
     context can be attached by query suffix, like "?context=value".
     since it is parsed from the right side, if uri contains "?", just suffix with "?".
+    note that this is different from standard url.
 
     context is designed for indicating that this resource is for which machine,
     so that resolver knows how to deal with local resource for remote machine.
@@ -322,9 +329,13 @@ class Resource:
 
     def __str__(self) -> str:
         uri = self.uri
-        context = urllib.parse.urlencode(self.context)
+        # minimal query string encoding
+        context = "&".join(
+            urlquote(k, "?&=") + "=" + urlquote(v, "?&")
+            for k, v in self.context
+        )
         if context or "?" in uri:
-            uri = uri + "?" + context
+            uri = f"{uri}?{context}"
         return uri
 
     @staticmethod
@@ -334,7 +345,7 @@ class Resource:
 @dataclass(frozen=True)
 class Include:
     """
-    include a file as a node using json pointer (ex. /path/to/file.yaml#/sub/field).
+    include a file as a node using path with json pointer (ex. /path/to/file.yaml#/sub/field).
     context can be attached by query suffix, like "?context=value".
 
     the included nodes will inherit this context, and prepend to underlying resources' context.
@@ -343,27 +354,31 @@ class Include:
     context is designed for indicating that underlying resources are for which machine,
     so that resolver know how to deal with local resources for remote machine.  
     """
-    link: Link = field(default_factory=Link)
+    link: PathWithJPointer = field(default_factory=PathWithJPointer)
     context: Tuple[Tuple[str, str], ...] = field(default_factory=lambda: ())
 
     @staticmethod
     def parse(link: str) -> "Include":
         link, context = (*link.rsplit("?", 1), "")[:2]
-        return Include(Link.parse(link), tuple(urllib.parse.parse_qsl(context)))
+        return Include(PathWithJPointer.parse(link), tuple(urllib.parse.parse_qsl(context)))
 
     def __str__(self) -> str:
         link = str(self.link)
-        context = urllib.parse.urlencode(self.context)
+        # minimal query string encoding
+        context = "&".join(
+            urlquote(k, "?&=") + "=" + urlquote(v, "?&")
+            for k, v in self.context
+        )
         if context or "?" in link:
             link = link + "?" + context
         return link
 
     @staticmethod
-    def create(link: Union[str, Path, Link]) -> "Include":
+    def create(link: Union[str, Path, PathWithJPointer]) -> "Include":
         if isinstance(link, str):
-            link = Link.parse(link)
+            link = PathWithJPointer.parse(link)
         elif isinstance(link, Path):
-            link = Link(link)
+            link = PathWithJPointer(link)
         return Include(link, ())
 
 @dataclass(frozen=True)
@@ -427,10 +442,10 @@ class SourcedYAMLDumper(SimpleYAMLDumper):
 
 def _resource_representer(self: SourcedYAMLDumper, data: Resource):
     #                                                    ________ doesn't work, always quoted
-    return self.represent_scalar("!resource", str(data), style="") # type: ignore
+    return self.represent_scalar("!resource", str(data), style="") # pyright: ignore[reportUnknownMemberType]
 
 def _include_representer(self: SourcedYAMLDumper, data: Include):
-    return self.represent_scalar("!include", str(data), style="") # type: ignore
+    return self.represent_scalar("!include", str(data), style="") # pyright: ignore[reportUnknownMemberType]
 
 def _merge_representer(self: SourcedYAMLDumper, data: Merge):
     return self.represent_sequence("!merge", data.items)
@@ -446,14 +461,14 @@ ABSENCE_VALUE = ABSENCE.VALUE
 
 
 class LoadSchemaWarning(Warning):
-    def __init__(self, link: Link):
+    def __init__(self, link: PathWithJPointer):
         self.link = link
 
     def __str__(self):
         return f"fail to load schema, file: {self.link.relative_to(Path.cwd())}" + (f"\n{self.__cause__}" if self.__cause__ else "")
 
 class SchemaRefLoopWarning(Warning):
-    def __init__(self, link: Link):
+    def __init__(self, link: PathWithJPointer):
         self.link = link
 
     def __str__(self):
@@ -467,7 +482,7 @@ class LoadSourceWarning(Warning):
         return f"fail to load YAML, file: {self.path.relative_to(Path.cwd())}\n" + (f"\n{self.__cause__}" if self.__cause__ else "")
 
 class LinkAccessWarning(Warning):
-    def __init__(self, link: Link):
+    def __init__(self, link: PathWithJPointer):
         self.link = link
     
     def __str__(self):
@@ -477,7 +492,7 @@ class LinkAccessWarning(Warning):
         return f"fail to access {relpath}"
 
 class SchemaMismatchTypeWarning(Warning):
-    def __init__(self, value_link: Link, value_type: str, schema_link: Link, schema_type: str):
+    def __init__(self, value_link: PathWithJPointer, value_type: str, schema_link: PathWithJPointer, schema_type: str):
         self.value_link = value_link
         self.value_type = value_type
         self.schema_link = schema_link
@@ -490,7 +505,7 @@ class SchemaMismatchTypeWarning(Warning):
         )
 
 class SchemaMismatchStructWarning(Warning):
-    def __init__(self, value_link: Link, schema_link: Link, additional_keys: Set[str], missing_keys: Set[str]):
+    def __init__(self, value_link: PathWithJPointer, schema_link: PathWithJPointer, additional_keys: Set[str], missing_keys: Set[str]):
         self.value_link = value_link
         self.schema_link = schema_link
         self.additional_keys = additional_keys
@@ -505,7 +520,7 @@ class SchemaMismatchStructWarning(Warning):
         )
 
 class SchemaMismatchScalarWarning(Warning):
-    def __init__(self, value_link: Link, value: Any, schema_link: Link, schema: SchemaJSON):
+    def __init__(self, value_link: PathWithJPointer, value: Any, schema_link: PathWithJPointer, schema: SchemaJSON):
         self.value_link = value_link
         self.value = value
         self.schema_link = schema_link
@@ -518,7 +533,7 @@ class SchemaMismatchScalarWarning(Warning):
         )
 
 class IncompatibleMergeWarning(Warning):
-    def __init__(self, left_link: Link, left_type: str, right_link: Link, right_type: str):
+    def __init__(self, left_link: PathWithJPointer, left_type: str, right_link: PathWithJPointer, right_type: str):
         self.left_link = left_link
         self.left_type = left_type
         self.right_link = right_link
@@ -531,7 +546,7 @@ class IncompatibleMergeWarning(Warning):
         )
 
 class NotScalarNodeWarning(Warning):
-    def __init__(self, link: Link):
+    def __init__(self, link: PathWithJPointer):
         self.link = link
     
     def __str__(self):
@@ -580,7 +595,7 @@ class InvalidIncludeWarning(Warning):
         return f"{self.value} is not a valid include path"
 
 class EmptyMergeWarning(Warning):
-    def __init__(self, link: Link):
+    def __init__(self, link: PathWithJPointer):
         self.link = link
     
     def __str__(self):
@@ -609,7 +624,7 @@ class SyncFileNotReadyWarning(Warning):
         return f"{self.which} yaml file is not ready"
 
 class UnsupportedDeletionSynchronizationWarning(Warning):
-    def __init__(self, fieldpath: FieldPath):
+    def __init__(self, fieldpath: JPointer):
         self.fieldpath = fieldpath
     
     def __str__(self):
@@ -721,7 +736,7 @@ def _SchemaJSON_checked_get(data: SchemaJSON, key: str, expected: Union[type, Tu
     if expected and not isinstance(value, expected):
         warnings.warn(ParseTypeWarning(value, expected))
         return default
-    return value # type: ignore
+    return cast(_V, value)
 
 @raises(ParseTypeWarning)
 def _SchemaJSON_checked_get_JSON(data: SchemaJSON, key: str) -> JSON:
@@ -791,7 +806,7 @@ class SchemaSource:
               | { "const": <value> }          // constant values
     """
     
-    link: Link
+    link: PathWithJPointer
     node: SchemaJSON
 
     def get_inner(self) -> Optional["SchemaSource"]:
@@ -799,9 +814,9 @@ class SchemaSource:
             return SchemaSource(self.link.append("anyOf").append(0), anyOf[0])
         return None
 
-    def get_ref(self) -> Optional[Link]:
+    def get_ref(self) -> Optional[PathWithJPointer]:
         if isinstance(self.node, dict) and isinstance(ref := self.node.get("$ref", None), str):
-            return Link.parse(ref)
+            return PathWithJPointer.parse(ref) # TODO: our parsing order is different from the standard
         return None
 
     # get type (any/struct/dict/array/null/scalar/enum/unknown)
@@ -866,7 +881,7 @@ class SchemaSource:
             with open(src, "r", encoding="utf-8") as f:
                 return yaml.load(f, Loader=SimpleYAMLLoader)
         except (yaml.YAMLError, OSError) as e:
-            err = LoadSchemaWarning(Link(src))
+            err = LoadSchemaWarning(PathWithJPointer(src))
             err.__cause__ = e
             warnings.warn(err)
             return ABSENCE_VALUE
@@ -874,7 +889,7 @@ class SchemaSource:
 @dataclass(frozen=True)
 class _SchemaNode:
     schema: SchemaSource
-    fieldpath: FieldPath = field(default_factory=FieldPath)
+    fieldpath: JPointer = field(default_factory=JPointer)
 
 @dataclass
 class Source:
@@ -891,22 +906,22 @@ class Source:
     link is the file path of this source + the field path to current node as an unresolved JSON object,
     that is, field path may contain index of list to be merged.
     """
-    link: Link
+    link: PathWithJPointer
     parent: Union[SourcedJSON, Dict[Path, Union[SourcedJSON, ABSENCE]]]
     key: Union[int, str, Path] # assert parent[key] is valid
     context: Tuple[Tuple[str, str], ...]
 
     def __post_init__(self):
         # ensure accessibility
-        self.parent[self.key] # type: ignore
+        self.data
 
     @property
     def data(self) -> SourcedJSON:
-        return self.parent[self.key] # type: ignore
+        return cast(SourcedJSON, self.parent[self.key]) # pyright: ignore[reportCallIssue, reportArgumentType, reportIndexIssue, reportOptionalSubscript]
 
     @data.setter
     def data(self, value: SourcedJSON):
-        self.parent[self.key] = value # type: ignore
+        self.parent[self.key] = value # pyright: ignore[reportArgumentType, reportCallIssue, reportIndexIssue, reportOptionalSubscript]
 
     def resolve_path(self, path: Path) -> Path:
         return (self.link.filepath.parent / path).resolve()
@@ -941,7 +956,7 @@ class SourcedNode:
     the file path refers to the root YAML file, not included YAML files;
     the field path may walk into included YAML file.
     """
-    link: Link
+    link: PathWithJPointer
     sources: List[Source] # assert len(self.sources) > 0
     # assert not isinstance(source.data, (Include, Merge))
     schema: List[SchemaSource]
@@ -991,7 +1006,7 @@ class SourcedNode:
         get type (null/scalar/map/seq) and value (None/scalar value or Resource/keys/index range)
         """
         type_, sources = self.access_sources()
-        value: Union[None, JSONScalar, List[str], range] = None
+        value: Union[None, JSONScalar, Resource, List[str], range] = None
         if type_ == "null":
             value = None
         elif type_ == "scalar":
@@ -999,7 +1014,7 @@ class SourcedNode:
             assert isinstance(data, (bool, int, float, str, Resource))
             if isinstance(data, Resource):
                 data = sources[-1].resolve_resource(data)
-            value = data # type: ignore
+            value = data
         elif type_ == "map":
             value = []
             for source in sources:
@@ -1130,19 +1145,19 @@ class SourceLoader:
             self.all_includes[filepath] = Source.load(filepath)
         if self.all_includes[filepath] is ABSENCE_VALUE:
             return None, None
-        raw_source = Source(Link(filepath), self.all_includes, filepath, context)
+        raw_source = Source(PathWithJPointer(filepath), self.all_includes, filepath, context)
         
         if isinstance(raw_source.data, dict):
             node = raw_source.data.get("$schema", None)
             if node is None:
                 raw_schema = None
             elif not is_JSON(node):
-                warnings.warn(LoadSchemaWarning(Link(filepath).append("$schema")))
+                warnings.warn(LoadSchemaWarning(PathWithJPointer(filepath).append("$schema")))
                 raw_schema = None
             elif isinstance(node, str):
-                raw_schema = SchemaSource(Link(filepath).append("$schema"), {"$ref": node})
+                raw_schema = SchemaSource(PathWithJPointer(filepath).append("$schema"), {"$ref": node})
             else:
-                raw_schema = SchemaSource(Link(filepath).append("$schema"), assert_JSON(node))
+                raw_schema = SchemaSource(PathWithJPointer(filepath).append("$schema"), assert_JSON(node))
         else:
             raw_schema = None
 
@@ -1157,10 +1172,10 @@ class SourceLoader:
         if filepath in self.all_includes:
             raise FileAlreadyLoadedError(filepath)
         self.all_includes[filepath] = None
-        return Source(Link(filepath), self.all_includes, filepath, ())
+        return Source(PathWithJPointer(filepath), self.all_includes, filepath, ())
 
     @raises(LoadSchemaWarning, LinkAccessWarning)
-    def _load_schema(self, link: Link) -> Optional[SchemaSource]:
+    def _load_schema(self, link: PathWithJPointer) -> Optional[SchemaSource]:
         if link.filepath not in self.all_schema:
             self.all_schema[link.filepath] = SchemaSource.load(link.filepath)
         schema = self.all_schema[link.filepath]
@@ -1169,14 +1184,14 @@ class SourceLoader:
         try:
             node = link.fieldpath.walk(schema)
         except FieldAccessError as err:
-            warnings.warn(LinkAccessWarning(Link(link.filepath, err.path)))
+            warnings.warn(LinkAccessWarning(PathWithJPointer(link.filepath, err.path)))
             return None
         return SchemaSource(link, node)
 
     @raises(LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
     def _resolve_schema_ref(self, schema: SchemaSource) -> Tuple[Optional[SchemaSource], Set[Path]]:
         depends: Set[Path] = set()
-        visited: Set[Link] = set()
+        visited: Set[PathWithJPointer] = set()
         while True:
             inner = schema.get_inner()
             if inner is not None:
@@ -1191,7 +1206,7 @@ class SourceLoader:
                     return None, set()
                 visited.add(ref)
                 depends.add(schema.resolve_path(ref.filepath))
-                ref = Link(schema.resolve_path(ref.filepath), ref.fieldpath)
+                ref = PathWithJPointer(schema.resolve_path(ref.filepath), ref.fieldpath)
                 schema_ = self._load_schema(ref)
                 if schema_ is None: return None, depends
                 schema = schema_
@@ -1201,7 +1216,7 @@ class SourceLoader:
         return schema, depends
 
     @raises(LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
-    def _resolve_schema(self, schema: SchemaSource, fieldpath: FieldPath) -> Tuple[Optional[SchemaSource], Set[Path]]:
+    def _resolve_schema(self, schema: SchemaSource, fieldpath: JPointer) -> Tuple[Optional[SchemaSource], Set[Path]]:
         depends: Set[Path] = set()
         for key in fieldpath.elements:
             schema_, depends_ = self._resolve_schema_ref(schema)
@@ -1224,14 +1239,12 @@ class SourceLoader:
 
             if type_ == "dict":
                 assert isinstance(value, SchemaSource)
-                if not isinstance(key, str):
-                    return None, depends
                 schema = value
                 continue
 
             if type_ == "array":
                 assert isinstance(value, SchemaSource)
-                if not isinstance(key, int):
+                if not JPointer.is_index(key):
                     return None, depends
                 schema = value
                 continue
@@ -1243,7 +1256,7 @@ class SourceLoader:
         return schema_, depends
 
     @raises(LoadSourceWarning, LoadSchemaWarning, EmptyMergeWarning)
-    def _resolve_sources(self, source: Source, fieldpath: FieldPath) -> Tuple[List[Source], List[_SchemaNode], Set[Path]]:
+    def _resolve_sources(self, source: Source, fieldpath: JPointer) -> Tuple[List[Source], List[_SchemaNode], Set[Path]]:
         outputs: List[Source] = []
         schema_nodes: List[_SchemaNode] = []
         depends: Set[Path] = set()
@@ -1275,12 +1288,15 @@ class SourceLoader:
                 continue
 
             key = fieldpath.elements[0]
-            if isinstance(key, str):
-                if not isinstance(data, dict) or key not in data:
+            if isinstance(data, dict):
+                if key not in data:
                     continue
+            elif isinstance(data, list):
+                if not JPointer.is_index(key) or int(key) >= len(data):
+                    continue
+                key = int(key)
             else:
-                if not isinstance(data, list) or key >= len(data):
-                    continue
+                continue
 
             source_key = Source(source.link.append(key), data, key, source.context)
             inputs.append((source_key, fieldpath[1:]))
@@ -1288,11 +1304,11 @@ class SourceLoader:
         return list(reversed(outputs)), list(reversed(schema_nodes)), depends
 
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
-    def load(self, src: Link) -> Tuple[Optional[SourcedNode], Set[Path]]:
+    def load(self, src: PathWithJPointer) -> Tuple[Optional[SourcedNode], Set[Path]]:
         """
         load yaml file, returns node and file dependencies of current node.
         """
-        src = Link(src.filepath.resolve(), src.fieldpath)
+        src = PathWithJPointer(src.filepath.resolve(), src.fieldpath)
         depends = {src.filepath}
         raw_source, raw_schema = self._load_source(src.filepath, ())
         if raw_source is None: return None, depends
@@ -1319,15 +1335,15 @@ class SourceLoader:
         if src is not None:
             src = src.resolve()
         source = self._new_source(src)
-        return SourcedNode(Link(source.link.filepath), [source], [])
+        return SourcedNode(PathWithJPointer(source.link.filepath), [source], [])
 
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
-    def get_(self, node: SourcedNode, fieldpath: Union[int, str, FieldPath]) -> Tuple[Optional[SourcedNode], Set[Path]]:
+    def get_(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> Tuple[Optional[SourcedNode], Set[Path]]:
         """
         resolve given node until given path. returns the node of given path and its dependencies, or None for failure.
         """
         if isinstance(fieldpath, (int, str)):
-            fieldpath = FieldPath((fieldpath,))
+            fieldpath = JPointer((str(fieldpath),))
 
         sources: List[Source] = []
         schema_nodes = [_SchemaNode(schema, fieldpath) for schema in node.schema]
@@ -1350,7 +1366,7 @@ class SourceLoader:
         return SourcedNode(node.link.extend(fieldpath), sources, schema_list), depends
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
-    def get(self, node: SourcedNode, fieldpath: Union[int, str, FieldPath]) -> Optional[SourcedNode]:
+    def get(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> Optional[SourcedNode]:
         """
         resolve given node until given path. returns the node of given path, or None for failure.
         """
@@ -1397,10 +1413,10 @@ class SourceLoader:
                     value = value.uri
             return value, depends
 
-    def _can_be_ensured_along(self, node: SourcedNode, fieldpath: FieldPath) -> Optional[LinkAccessWarning]:
+    def _can_be_ensured_along(self, node: SourcedNode, fieldpath: JPointer) -> Optional[LinkAccessWarning]:
         """
         check if _ensure_top_along can be done.
-        it is invalid for accessing map/seq as seq/map.
+        it is invalid for accessing seq as map.
         accessing map/seq using absent key is valid, empty slots will be filled while ensuring.
         it is valid to access null as seq/map, since it is treated as empty slot.
         access warning will be returned for failure.
@@ -1412,25 +1428,17 @@ class SourceLoader:
 
             for key in fieldpath.elements:
                 type_, _value = node.access()
-                if isinstance(key, int):
-                    if type_ == "null": break
-                    if type_ != "seq":
-                        return LinkAccessWarning(Link(node.link.filepath, node.link.fieldpath.append(key)))
-                    node_ = self.get(node, key)
-                    if node_ is None: break
-                    node = node_
-                else:
-                    if type_ == "null": break
-                    if type_ != "map":
-                        return LinkAccessWarning(Link(node.link.filepath, node.link.fieldpath.append(key)))
-                    node_ = self.get(node, key)
-                    if node_ is None: break
-                    node = node_
+                if type_ == "null": break
+                if type_ == "seq" and not JPointer.is_index(key):
+                    return LinkAccessWarning(PathWithJPointer(node.link.filepath, node.link.fieldpath.append(key)))
+                node_ = self.get(node, key)
+                if node_ is None: break
+                node = node_
 
         return None
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning)
-    def _ensure_top_along(self, node: SourcedNode, fieldpath: FieldPath, ensure_null: bool = False) -> Optional[SourcedNode]:
+    def _ensure_top_along(self, node: SourcedNode, fieldpath: JPointer, ensure_null: bool = False) -> Optional[SourcedNode]:
         """
         ensure a given path can be accessed and will be stored at the file of current top layer.
         returns the node of given path, or None if it is invalid.
@@ -1448,20 +1456,22 @@ class SourceLoader:
         for i, key in enumerate(fieldpath.elements):
             is_last_key = i == len(fieldpath.elements) - 1
 
-            if isinstance(key, int):
-                data = node.sources[-1].data
-                if data is None:
+            data = node.sources[-1].data
+            if data is None:
+                if JPointer.is_index(key):
                     data = node.sources[-1].data = []
-                assert isinstance(data, list)
+                else:
+                    data = node.sources[-1].data = {}
+            if isinstance(data, list):
+                assert JPointer.is_index(key)
+                key = int(key)
                 if key >= len(data):
                     data.extend([None]*(key + 1 - len(data)))
-            else:
-                data = node.sources[-1].data
-                if data is None:
-                    data = node.sources[-1].data = {}
-                assert isinstance(data, dict)
+            elif isinstance(data, dict):
                 if key not in data:
                     data[key] = None
+            else:
+                assert False
 
             source = node.sources[-1]
             source = Source(source.link.append(key), source.data, key, source.context)
@@ -1503,12 +1513,11 @@ class SourceLoader:
 
         <!> this may invalidate other sourced node.
         """
-        for folded_path, value in JSONLike_deep_iter(folded_dict):
-            path = FieldPath(tuple(elem for subpath in folded_path.elements for elem in FieldPath.parse(str(subpath)).elements))
+        for path, value in JSONLike_deep_iter(folded_dict):
             subnode = self._ensure_top_along(node, path, False)
             if subnode is None:
                 continue
-            if not isinstance(value, (bool, int, float, str, Path)): # type: ignore
+            if not isinstance(value, (bool, int, float, str, Path)): # pyright: ignore[reportUnnecessaryIsInstance]
                 warnings.warn(InvalidScalarWarning(value))
                 continue
             if isinstance(value, Path):
@@ -1531,14 +1540,13 @@ class SourceLoader:
 
         <!> this may invalidate other sourced node.
         """
-        for folded_path, value in JSONLike_deep_iter(folded_dict):
-            path = FieldPath(tuple(elem for subpath in folded_path.elements for elem in FieldPath.parse(str(subpath)).elements))
+        for path, value in JSONLike_deep_iter(folded_dict):
             subnode = self._ensure_top_along(node, path, True)
             if subnode is None:
                 continue
             source = subnode.sources[-1]
             assert source.data is None
-            if not isinstance(value, (str, Path, Link)): # type: ignore
+            if not isinstance(value, (str, Path, PathWithJPointer)): # pyright: ignore[reportUnnecessaryIsInstance]
                 warnings.warn(InvalidIncludeWarning(value))
                 continue
             else:
@@ -1547,13 +1555,13 @@ class SourceLoader:
                     include = self.sync_resource_manager.attach_machine(include, machine)
                 source.data = include
 
-def resolve_YAML(link: Link) -> JSON:
+def resolve_YAML(link: PathWithJPointer) -> JSON:
     """
     load and resolve yaml file, return resolved json
     (paths of local resources will not be rewritten).
     """
     loader = SourceLoader()
-    link = Link(link.filepath.resolve(), link.fieldpath)
+    link = PathWithJPointer(link.filepath.resolve(), link.fieldpath)
 
     data = None
     node, _depends = loader.load(link)
@@ -1618,7 +1626,7 @@ class YAMLWatcher:
                     del self.loader.all_schema[depend]
 
         depends = {self.path}
-        node, depends_ = self.loader.load(Link(self.path))
+        node, depends_ = self.loader.load(PathWithJPointer(self.path))
         depends.update(depends_)
 
         sync_resources: List[SyncInfo] = []
@@ -1646,7 +1654,7 @@ class YAMLWatcher:
 
                 if not isinstance(data.get("$sync_resources"), list):
                     data["$sync_resources"] = []
-                data["$sync_resources"].extend(sync_resources_json) # type: ignore
+                cast(List[JSON], data["$sync_resources"]).extend(sync_resources_json)
 
         self.depends = depends
         self.node = node
@@ -1698,15 +1706,15 @@ def deep_copy_skip_empty(obj: JSON) -> Optional[JSON]:
 
     return deep_copy(obj)
 
-def rosparam_diff(old: JSON, new: JSON) -> Dict["FieldPath", Optional[JSON]]:
+def rosparam_diff(old: JSON, new: JSON) -> Dict[JPointer, Optional[JSON]]:
     """
     diff in the scalar level, returns dict from path to updated values (None for deletion).
     treat null as empty map, seq as scalar.
     (this is for updating ros parameter, because rosparam treat seq as scalar)
     """
-    updated: Dict[FieldPath, Optional[JSON]] = {}
+    updated: Dict[JPointer, Optional[JSON]] = {}
 
-    def walk(path: FieldPath, a: JSON, b: JSON):
+    def walk(path: JPointer, a: JSON, b: JSON):
         nonlocal updated
         if a is None: a = {}
         if b is None: b = {}
@@ -1735,11 +1743,11 @@ def rosparam_diff(old: JSON, new: JSON) -> Dict["FieldPath", Optional[JSON]]:
                 bv = b.get(k, {})
                 walk(path.append(k), av, bv)
 
-    walk(FieldPath(), old, new)
+    walk(JPointer(), old, new)
     return updated
 
-_ResolvedListener = Callable[[Dict[FieldPath, Optional[JSON]]], None] # [FieldPath]JSON? -> None
-_BackResolvedListener = Callable[[Path, Dict[FieldPath, Optional[SourcedJSON]]], None] # (Path, [FieldPath]SourcedJSON?) -> None
+_ResolvedListener = Callable[[Dict[JPointer, Optional[JSON]]], None] # [JPointer]JSON? -> None
+_BackResolvedListener = Callable[[Path, Dict[JPointer, Optional[SourcedJSON]]], None] # (Path, [JPointer]SourcedJSON?) -> None
 
 class YAMLSynchronizer:
     """
@@ -1777,7 +1785,7 @@ class YAMLSynchronizer:
             EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning,
             RootIsNotMapWarning, SyncFileNotReadyWarning)
-    def resolve(self) -> Dict[FieldPath, JSON]:
+    def resolve(self) -> Dict[JPointer, JSON]:
         """
         resolve sourced yaml file and update resolved yaml file.
         returns difference for rosparam.
@@ -1804,7 +1812,7 @@ class YAMLSynchronizer:
             EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning, InvalidScalarWarning,
             RootIsNotMapWarning, UnsupportedDeletionSynchronizationWarning)
-    def back_resolve(self) -> Dict[Path, Dict[FieldPath, SourcedJSON]]:
+    def back_resolve(self) -> Dict[Path, Dict[JPointer, SourcedJSON]]:
         """
         back resolve resolved yaml file and update sourced yaml file.
         returns difference for each included path.
@@ -1817,13 +1825,13 @@ class YAMLSynchronizer:
             return {}
 
         self.resolved.load(False, False)
-        if self.resolved.node is None: # type: ignore
+        if self.resolved.node is None: # pyright: ignore[reportUnnecessaryComparison]
             warnings.warn(SyncFileNotReadyWarning("resolved"))
             return {}
 
         resolved_diff = deep_diff(old_resolved_data, self.resolved.data)
 
-        diffs: Dict[Path, Dict[FieldPath, SourcedJSON]] = {}
+        diffs: Dict[Path, Dict[JPointer, SourcedJSON]] = {}
 
         if resolved_diff:
             if self.original.data is None:
@@ -1865,11 +1873,11 @@ class YAMLSynchronizer:
     def add_back_resolved_listener(self, callback: _BackResolvedListener):
         self._back_resolved_listeners.append(callback)
 
-    def _resolved_listener(self, diff: Dict[FieldPath, Optional[JSON]]):
+    def _resolved_listener(self, diff: Dict[JPointer, Optional[JSON]]):
         for lisener in self._resolved_listeners:
             lisener(diff)
 
-    def _back_resolved_listener(self, path: Path, diff: Dict[FieldPath, Optional[SourcedJSON]]):
+    def _back_resolved_listener(self, path: Path, diff: Dict[JPointer, Optional[SourcedJSON]]):
         for lisener in self._back_resolved_listeners:
             lisener(path, diff)
 
@@ -1902,34 +1910,51 @@ class YAMLSynchronizer:
 
 
 @dataclass(frozen=True)
-class XPointer:
+class PathWithXPointer:
+    """
+    a xml file path with xml pointer, represents part of a xml node.  
+    format: /path/to/file.yaml#xpointer(/sub/field[@sel='val'])  
+    where "#/sub/field[@sel='val']" indicates the selector for this xml document.
+    xml pointer should be %-encoded to escape '%' and '#'.
+    since it is parsed from the right side, if file path contains "#", just suffix with "#".
+    note that this is different from standard url.
+    """
     filepath: Path
     xpath: str
     
     @staticmethod
-    def parse(path: str) -> "XPointer":
+    def parse(path: str) -> "PathWithXPointer":
         filepath, fieldpath = (*path.rsplit("#", 1), "")[:2]
         if fieldpath and not (fieldpath.startswith("xpointer(") and fieldpath.endswith(")")):
             raise ValueError(f"invalid xpointer: {path}")
         fieldpath = fieldpath[len("xpointer("):-len(")")]
-        return XPointer(Path(filepath), fieldpath)
+        fieldpath = urllib.parse.unquote(fieldpath)
+        return PathWithXPointer(Path(filepath), fieldpath)
 
     def __str__(self):
-        return f"{self.filepath}#xpointer({self.xpath})"
+        # minimal %-encoded
+        filepath = str(self.filepath)
+        xpath = urlquote(self.xpath, "#")
+        if xpath:
+            return f"{filepath}#xpointer({xpath})"
+        elif "#" in filepath:
+            return f"{filepath}#"
+        else:
+            return filepath
 
     def get(self):
         with open(self.filepath, "r") as f:
             root = ET.parse(f)
-        # for API, ./launch/rosparam means: {whatever root node} > launch > rosparam
+        # in ET.Element.find(), ./launch/rosparam means: {whatever root node} > launch > rosparam
         # but I want: launch (is the root node) > rosparam
         wrapper = ET.Element("_document")
         wrapper.append(root.getroot())
         return wrapper.find("." + self.xpath)
 
-def parse_jsonpointer_or_xpointer(path: Union[str, Path, Link, XPointer]) -> Union[Link, XPointer]:
-    if isinstance(path, Link):
+def parse_jsonpointer_or_xpointer(path: Union[str, Path, PathWithJPointer, PathWithXPointer]) -> Union[PathWithJPointer, PathWithXPointer]:
+    if isinstance(path, PathWithJPointer):
         return path
-    if isinstance(path, XPointer):
+    if isinstance(path, PathWithXPointer):
         return path
 
     if isinstance(path, Path):
@@ -1940,19 +1965,19 @@ def parse_jsonpointer_or_xpointer(path: Union[str, Path, Link, XPointer]) -> Uni
     suffix = Path(path.rsplit("#", 1)[0]).suffix
 
     if suffix == ".yaml":
-        link = Link.parse(path)
-        link = Link(link.filepath.resolve(), link.fieldpath)
+        link = PathWithJPointer.parse(path)
+        link = PathWithJPointer(link.filepath.resolve(), link.fieldpath)
         return link
     
     elif suffix == ".launch":
-        pointer = XPointer.parse(path)
-        pointer = XPointer(pointer.filepath.resolve(), pointer.xpath)
+        pointer = PathWithXPointer.parse(path)
+        pointer = PathWithXPointer(pointer.filepath.resolve(), pointer.xpath)
         return pointer
 
     else:
         raise ValueError(f"unknown file type: {path}")
 
-def to_resolved(source_path: Union[str, Path, Link, XPointer], skip_empty: bool = True, aggregate_sync_resources: bool = True) -> str:
+def to_resolved(source_path: Union[str, Path, PathWithJPointer, PathWithXPointer], skip_empty: bool = True, aggregate_sync_resources: bool = True) -> str:
     """
     resolve yaml file, save as {name}.resolved.yaml, returns resolved yaml file path.
 
@@ -1964,14 +1989,14 @@ def to_resolved(source_path: Union[str, Path, Link, XPointer], skip_empty: bool 
     parent = source_path.filepath.parent
     stem = source_path.filepath.stem
 
-    if isinstance(source_path, XPointer):
+    if isinstance(source_path, PathWithXPointer):
         elem = source_path.get()
         if elem is None:
             raise ValueError(f"fail to read embeded param: {source_path}")
         extracted_path = parent / f"{stem}.extracted.yaml"
         print(f"yaml is embeded in a xml, extract into {extracted_path}", file=sys.stderr)
         extracted_path.write_text(elem.text or "")
-        source_path = Link(extracted_path)
+        source_path = PathWithJPointer(extracted_path)
 
     if source_path.fieldpath:
         raw_source_json = load_ExYAML(source_path, True)
@@ -1979,7 +2004,7 @@ def to_resolved(source_path: Union[str, Path, Link, XPointer], skip_empty: bool 
         extracted_path = parent / f"{stem}.extracted.yaml"
         print(f"only a portion of yaml need to be resolved, extract into {extracted_path}", file=sys.stderr)
         extracted_path.write_text(raw_source_str)
-        source_path = Link(extracted_path)
+        source_path = PathWithJPointer(extracted_path)
 
     source_path = source_path.filepath
 

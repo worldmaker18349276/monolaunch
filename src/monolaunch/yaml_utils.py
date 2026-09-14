@@ -74,9 +74,11 @@ you can use `python -m monolaunch.yaml_utils <yaml file>` directly to resolve YA
 """
 from inspect import cleandoc
 import math
-from typing import Any, Dict, Generator, List, Set, Tuple, Union, Optional
+import re
+from typing import Any, Dict, Generator, List, Set, Tuple, Union, Optional, cast
 import os.path
 from pathlib import Path
+import urllib.parse
 from dataclasses import dataclass, field
 import yaml
 
@@ -84,7 +86,7 @@ __all__ = [
     "JSONScalar", "JSON",
     "is_JSON", "assert_JSON",
     "deep_update", "deep_merge", "deep_copy", "deep_eq", "deep_diff", "deep_iter",
-    "FieldAccessError", "FieldPath", "Link",
+    "FieldAccessError", "JPointer", "PathWithJPointer",
     "SimpleYAMLLoader", "load_YAML", "SimpleYAMLDumper", "save_YAML",
     "TaggedScalar", "TaggedDict", "TaggedList", "TaggedJSON",
     "ExYAMLLoader", "load_ExYAML", "ExYAMLDumper", "save_ExYAML",
@@ -115,9 +117,9 @@ def is_JSON(data: Any) -> bool:
     if type(data) in (type(None), bool, int, float, str):
         return True
     elif type(data) == list:
-        return all(is_JSON(e) for e in data) # pyright: ignore[reportUnknownVariableType]
+        return all(is_JSON(e) for e in cast(List[Any], data))
     elif type(data) == dict:
-        return all(type(k) == str and is_JSON(v) for k, v in data.items()) # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        return all(type(k) == str and is_JSON(v) for k, v in cast(Dict[Any, Any], data).items())
     else:
         return False
 
@@ -127,7 +129,7 @@ def assert_JSON(data: Any) -> JSON:
     """
     if not is_JSON(data):
         raise TypeError(f"not json: {data}")
-    return data
+    return cast(JSON, data)
 
 
 def deep_copy(obj: JSON) -> JSON:
@@ -173,7 +175,7 @@ def deep_update(base: JSON, update: JSON) -> JSON:
 
     return deep_copy(update)
 
-def _deep_merge(path: "FieldPath", base: JSON, update: JSON) -> Tuple[JSON, List["FieldPath"]]:
+def _deep_merge(path: "JPointer", base: JSON, update: JSON) -> Tuple[JSON, List["JPointer"]]:
     # skip null
     if base is not None and update is None:
         return base, []
@@ -186,7 +188,7 @@ def _deep_merge(path: "FieldPath", base: JSON, update: JSON) -> Tuple[JSON, List
 
     if isinstance(base, dict):
         assert isinstance(update, dict)
-        inconsistencies: List[FieldPath] = []
+        inconsistencies: List[JPointer] = []
         for k, v in update.items():
             v, a = _deep_merge(path.append(k), base.get(k), v)
             base[k] = v
@@ -195,7 +197,7 @@ def _deep_merge(path: "FieldPath", base: JSON, update: JSON) -> Tuple[JSON, List
 
     if isinstance(base, list):
         assert isinstance(update, list)
-        inconsistencies: List[FieldPath] = []
+        inconsistencies: List[JPointer] = []
         # zip longest
         if len(base) < len(update):
             base.extend([None]*(len(update) - len(base)))
@@ -212,12 +214,12 @@ def _deep_merge(path: "FieldPath", base: JSON, update: JSON) -> Tuple[JSON, List
 
     return base, [path]
 
-def deep_merge(base: JSON, update: JSON) -> Tuple[JSON, List["FieldPath"]]:
+def deep_merge(base: JSON, update: JSON) -> Tuple[JSON, List["JPointer"]]:
     """
     merge base by copying update, returns merged base and inconsistent paths.
     unlike deep_update, different values at the same field will not be overrided, and warnings will be raised.
     """
-    return _deep_merge(FieldPath(), base, update)
+    return _deep_merge(JPointer(), base, update)
 
 def deep_eq(lhs: JSON, rhs: JSON) -> bool:
     """
@@ -255,15 +257,15 @@ def deep_eq(lhs: JSON, rhs: JSON) -> bool:
 
     return True
 
-def deep_diff(old: JSON, new: JSON) -> Dict["FieldPath", Optional[JSON]]:
+def deep_diff(old: JSON, new: JSON) -> Dict["JPointer", Optional[JSON]]:
     """
     diff in the scalar level.
     null is treated as empty slot.
     returns map from paths to: scalars for updating values, or maps/seqs for changing types, or None for deletion.
     """
-    updated: Dict[FieldPath, Optional[JSON]] = {}
+    updated: Dict[JPointer, Optional[JSON]] = {}
 
-    stack: List[Tuple[FieldPath, JSON, JSON]] = [(FieldPath(), old, new)]
+    stack: List[Tuple[JPointer, JSON, JSON]] = [(JPointer(), old, new)]
     while stack:
         path, a, b = stack.pop()
 
@@ -301,11 +303,11 @@ def deep_diff(old: JSON, new: JSON) -> Dict["FieldPath", Optional[JSON]]:
 
     return updated
 
-def deep_iter(obj: JSON) -> Generator[Tuple["FieldPath", JSONScalar], None, None]:
+def deep_iter(obj: JSON) -> Generator[Tuple["JPointer", JSONScalar], None, None]:
     """
     traverse into dict/list until scalar, skip null, yield path and scalar.
     """
-    stack = [(FieldPath(), obj)]
+    stack = [(JPointer(), obj)]
     while stack:
         path, value = stack.pop()
         if isinstance(value, dict):
@@ -322,69 +324,91 @@ def deep_iter(obj: JSON) -> Generator[Tuple["FieldPath", JSONScalar], None, None
 
 
 class FieldAccessError(Exception):
-    def __init__(self, path: "FieldPath", obj: str):
+    def __init__(self, path: "JPointer", obj: str):
         self.obj = obj
         self.path = path
     
     def __str__(self):
         return f"fail to access {self.path} from {self.obj}"
 
-@dataclass(frozen=True)
-class FieldPath:
-    """
-    a path for traversing nested map and seq.
-    element can be str for accessing map, or int for accessing seq.
-    map keys must not contain '/' or '#'.
-    """
-    elements: Tuple[Union[int, str], ...] = field(default_factory=tuple)
+class InvalidJPointerFormat(Exception):
+    def __init__(self, fieldpath: str):
+        self.fieldpath = fieldpath
 
-    def __post_init__(self):
-        for key in self.elements:
-            if isinstance(key, str) and ("/" in key or "#" in key):
-                raise ValueError(f"element of FieldPath cannot contain '/' or '#': {key}")
+    def __str__(self):
+        return f"invalid JSON pointer syntax: {self.fieldpath}"
+
+INDEX_REGEX = re.compile("^(0|[1-9][0-9]*)$")
+
+def urlquote(s: str, unsafe: str = r"#@/:;?") -> str:
+    # minimal %-encode
+    s = re.sub(r"%(?=[0-9a-fA-F][0-9a-fA-F])", "%25", s)
+    return re.sub(
+        f"[{re.escape(unsafe)}]",
+        lambda m: ''.join(f"%{b:02X}" for b in m.group(0).encode("utf-8")),
+        s,
+    )
+
+@dataclass(frozen=True)
+class JPointer:
+    """
+    JSON pointer, a path for traversing nested map and seq.
+    example: /a/b/c indicates the subfield obj["a"]["b"]["c"] of a json object obj.
+    "-" for seq is banned.
+    see: https://datatracker.ietf.org/doc/html/rfc6901
+    """
+    elements: Tuple[str, ...] = field(default_factory=lambda: ())
 
     @staticmethod
-    def parse(fieldpath: str) -> "FieldPath":
+    def parse(fieldpath: str) -> "JPointer":
         """
-        parse slashed-separated path into FieldPath.
+        parse JSON pointer.
         """
-        path: List[Union[int, str]] = []
-        for e in fieldpath.strip("/").split("/"):
-            if e:
-                if all(d in "0123456789" for d in e):
-                    e = int(e, 10)
-                path.append(e)
-        return FieldPath(tuple(path))
+        if not fieldpath:
+            return JPointer(())
+        if not fieldpath.startswith("/"):
+            raise InvalidJPointerFormat(fieldpath)
+        return JPointer(tuple(e.replace("~1", "/").replace("~0", "~") for e in fieldpath[1:].split("/")))
 
     def __str__(self) -> str:
-        return "/" + "/".join(str(e) for e in self.elements)
+        # minimal escape
+        return "".join("/" + e.replace("~0", "~00").replace("~1", "~01").replace("/", "~1") for e in self.elements)
 
     def __repr__(self) -> str:
-        return f"FieldPath.parse({str(self)!r})"
+        return f"JPointer.parse({str(self)!r})"
 
-    def __truediv__(self, key_or_subpath: Union[int, str, "FieldPath"]) -> "FieldPath":
-        if isinstance(key_or_subpath, FieldPath):
+    def __truediv__(self, key_or_subpath: Union[int, str, "JPointer"]) -> "JPointer":
+        if isinstance(key_or_subpath, JPointer):
             return self.extend(key_or_subpath)
-        elif isinstance(key_or_subpath, str):
-            return self.extend(FieldPath.parse(key_or_subpath))
         else:
-            return self.append(key_or_subpath)
+            if isinstance(key_or_subpath, int):
+                key_or_subpath = str(key_or_subpath)
+            # JPointer.parse("/a/b") / "c/d"  ==  JPointer.parse("/a/b/c/d")
+            if key_or_subpath and not key_or_subpath.startswith("/"):
+                key_or_subpath = "/" + key_or_subpath
+            return self.extend(JPointer.parse(key_or_subpath))
     
-    def append(self, key: Union[int, str]) -> "FieldPath":
-        return FieldPath(self.elements + (key,))
+    def append(self, key: Union[int, str]) -> "JPointer":
+        if isinstance(key, int):
+            key = str(key)
+        return JPointer(self.elements + (key,))
     
-    def extend(self, subpath: "FieldPath") -> "FieldPath":
-        return FieldPath(self.elements + subpath.elements)
+    def extend(self, subpath: "JPointer") -> "JPointer":
+        return JPointer(self.elements + subpath.elements)
     
     def __bool__(self) -> bool:
         return bool(self.elements)
     
-    def __getitem__(self, index: slice) -> "FieldPath":
+    def __getitem__(self, index: slice) -> "JPointer":
         assert isinstance(index, slice)
-        return FieldPath(self.elements[index])
+        return JPointer(self.elements[index])
 
-    def is_prefix(self, longer: "FieldPath") -> bool:
+    def is_prefix(self, longer: "JPointer") -> bool:
         return longer.elements[:len(self.elements)] == self.elements
+
+    @staticmethod
+    def is_index(key: str) -> bool:
+        return bool(INDEX_REGEX.match(key))
 
     # @raises(FieldAccessError)
     def walk(self, root: JSON) -> JSON:
@@ -394,65 +418,70 @@ class FieldPath:
         """
         node = root
         for i, key in enumerate(self.elements):
-            if isinstance(key, str):
-                if not isinstance(node, dict) or key not in node:
-                    raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
+            if isinstance(node, dict):
                 node = node[key]
+            elif isinstance(node, list):
+                if not self.is_index(key):
+                    raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
+                node = node[int(key)]
             else:
-                if not isinstance(node, list) or key not in range(len(node)):
-                    raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
-                node = node[key]
+                raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
         return node
 
 @dataclass(frozen=True)
-class Link:
+class PathWithJPointer:
     """
-    a json pointer represents part of a json object.  
+    a json file path with json pointer, represents part of a json object.  
     format: /path/to/file.yaml#/sub/field  
-
-    "#/sub/field" indicates the subfield of this json object.
-    "#/sub/field" and "#sub/field" have no difference.
-    since it is parsed from the right side, field path cannot contain "#",
-    and if file path contains "#", just suffix with "#".
+    where "#/sub/field" indicates the subfield of this json object.
+    json pointer should be %-encoded to escape '%' and '#'.
+    since it is parsed from the right side, if file path contains "#", just suffix with "#".
+    note that this is different from standard url.
     """
     filepath: Path = field(default_factory=Path)
-    fieldpath: FieldPath = field(default_factory=FieldPath)
+    fieldpath: JPointer = field(default_factory=JPointer)
     
     @staticmethod
-    def parse(file_field_path: str) -> "Link":
+    def parse(file_field_path: str) -> "PathWithJPointer":
         filepath, fieldpath = (*file_field_path.rsplit("#", 1), "")[:2]
-        return Link(Path(filepath), FieldPath.parse(fieldpath))
+        fieldpath = urllib.parse.unquote(fieldpath)
+        return PathWithJPointer(Path(filepath), JPointer.parse(fieldpath))
 
     @staticmethod
-    def create(link: Union[str, Path, "Link"]) -> "Link":
+    def create(link: Union[str, Path, "PathWithJPointer"]) -> "PathWithJPointer":
         if isinstance(link, str):
-            link = Link.parse(link)
+            link = PathWithJPointer.parse(link)
         elif isinstance(link, Path):
-            link = Link(link)
+            link = PathWithJPointer(link)
         return link
 
-    def __truediv__(self, key: Union[int, str, FieldPath]) -> "Link":
+    def __truediv__(self, key: Union[int, str, JPointer]) -> "PathWithJPointer":
         """right concat"""
-        return Link(self.filepath, self.fieldpath / key)
+        return PathWithJPointer(self.filepath, self.fieldpath / key)
 
-    def append(self, key: Union[int, str]) -> "Link":
-        return Link(self.filepath, self.fieldpath.append(key))
+    def append(self, key: Union[int, str]) -> "PathWithJPointer":
+        return PathWithJPointer(self.filepath, self.fieldpath.append(key))
 
-    def extend(self, subfieldpath: FieldPath) -> "Link":
-        return Link(self.filepath, self.fieldpath.extend(subfieldpath))
+    def extend(self, subfieldpath: JPointer) -> "PathWithJPointer":
+        return PathWithJPointer(self.filepath, self.fieldpath.extend(subfieldpath))
 
-    def relative_to(self, path: Path) -> "Link":
+    def resolve(self, base_path: Optional[Path] = None) -> "PathWithJPointer":
+        return PathWithJPointer(((base_path or Path()) / self.filepath).resolve(), self.fieldpath)
+
+    def relative_to(self, path: Path) -> "PathWithJPointer":
         """left divide"""
-        return Link(Path(os.path.relpath(self.filepath, path)), self.fieldpath)
+        return PathWithJPointer(Path(os.path.relpath(self.filepath, path)), self.fieldpath)
     
     def __str__(self) -> str:
-        if self.fieldpath or "#" in str(self.filepath):
-            return str(self.filepath) + "#" + str(self.fieldpath)
+        filepath = str(self.filepath)
+        fieldpath = urlquote(str(self.fieldpath), "#")
+        if fieldpath or "#" in filepath:
+            return f"{filepath}#{fieldpath}"
         else:
-            return str(self.filepath)
+            return filepath
 
     def __repr__(self) -> str:
-        return f"Link.parse({str(self)!r})"
+        return f"PathWithJPointer.parse({str(self)!r})"
 
 
 class SimpleYAMLLoader(yaml.SafeLoader):
@@ -475,17 +504,17 @@ def _dict_constructor(loader: SimpleYAMLLoader, node: yaml.nodes.Node) -> Dict[s
     wrong_key_type = next((type(key).__name__ for key in res.keys() if type(key) != str), None)
     if wrong_key_type is not None:
         raise yaml.constructor.ConstructorError(f"key of map must be str, got: {wrong_key_type}")
-    return res # pyright: ignore[reportReturnType]
+    return cast(Dict[str, Any], res)
 
 SimpleYAMLLoader.add_constructor("tag:yaml.org,2002:map", _dict_constructor)
 
 # @raises(FieldAccessError)
-def load_YAML(link: Link) -> JSON:
+def load_YAML(link: PathWithJPointer) -> JSON:
     """
     load yaml format as json object: no complex key for maps, no alias.
     """
     with open(link.filepath, 'r') as f:
-        data = yaml.load(f, Loader=SimpleYAMLLoader)
+        data = cast(JSON, yaml.load(f, Loader=SimpleYAMLLoader))
     try:
         return link.fieldpath.walk(data)
     except FieldAccessError as e:
@@ -521,17 +550,17 @@ def _include_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJ
             node.start_mark,
         )
 
-    link = Link.parse(link)
+    link = PathWithJPointer.parse(link)
 
     subfilepath = loader.filepath.parent / link.filepath
     with open(subfilepath, 'r') as f:
         subloader = type(loader)(f)
         subloader.set_filepath(subfilepath)
         try:
-            data = subloader.get_single_data()
+            data = cast(TaggedJSON, subloader.get_single_data())
         finally:
             subloader.dispose() # pyright: ignore[reportUnknownMemberType]
-    return link.fieldpath.walk(data) # pyright: ignore[reportReturnType]
+    return cast(TaggedJSON, link.fieldpath.walk(cast(JSON, data)))
 
 def _merge_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSON:
     if loader.raw:
@@ -546,10 +575,10 @@ def _merge_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJSO
     objs = loader.construct_sequence(node, deep=True)
     if not objs:
         return None
-    obj = objs[0]
+    obj = cast(TaggedJSON, objs[0])
     for obj_ in objs[1:]:
-        obj = deep_update(obj, obj_)
-    return obj # pyright: ignore[reportReturnType]
+        obj = cast(TaggedJSON, deep_update(cast(JSON, obj), obj_))
+    return obj
 
 def _unknown_tag_constructor(loader: ExYAMLLoader, tag_suffix: str, node: yaml.nodes.Node) -> TaggedJSON:
     if isinstance(node, yaml.ScalarNode):
@@ -576,7 +605,7 @@ ExYAMLLoader.add_constructor("!merge", _merge_constructor)
 ExYAMLLoader.add_multi_constructor("!", _unknown_tag_constructor) # pyright: ignore[reportUnknownMemberType]
 
 # @raises(FieldAccessError)
-def load_ExYAML(link: Link, raw: bool = False) -> TaggedJSON:
+def load_ExYAML(link: PathWithJPointer, raw: bool = False) -> TaggedJSON:
     """
     load yaml with !include and !merge, and keep other tags.
     if raw is true, don't resolve !include and !merge.
@@ -587,11 +616,11 @@ def load_ExYAML(link: Link, raw: bool = False) -> TaggedJSON:
         loader.set_filepath(filepath)
         loader.set_raw(raw)
         try:
-            data = loader.get_single_data()
+            data = cast(JSON, loader.get_single_data())
         finally:
             loader.dispose() # pyright: ignore[reportUnknownMemberType]
     # walk works for TaggedList and TaggedDict
-    return link.fieldpath.walk(data) # pyright: ignore[reportReturnType]
+    return cast(TaggedJSON, link.fieldpath.walk(data))
 
 
 class SimpleYAMLDumper(yaml.SafeDumper):
@@ -697,14 +726,14 @@ def _resolve_yaml(link: str, raw: bool = False):
     """
 
     import warnings
-    def formatwarning(message, category, filename, lineno, line=None): # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]
+    def formatwarning(message: str, category, filename, lineno, line=None): # pyright: ignore[reportMissingParameterType, reportUnknownParameterType]
         return "".join(
             f"# {'     ' if i else 'WARN:'} {line}\n"
-            for i, line in enumerate(str(message).splitlines()) # pyright: ignore[reportUnknownArgumentType]
+            for i, line in enumerate(str(message).splitlines())
         )
     warnings.formatwarning = formatwarning
 
-    data = load_ExYAML(Link.parse(link), raw)
+    data = load_ExYAML(PathWithJPointer.parse(link), raw)
     data_str = yaml.dump(data, Dumper=ExYAMLDumper, sort_keys=False)
 
     sys.stderr.flush()
