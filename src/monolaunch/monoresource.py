@@ -136,13 +136,13 @@ class Machine:
             is_local = self.user == getpass.getuser()
         return is_local
 
-    def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True) -> Tuple[str, ...]:
+    def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True, tt: bool = False) -> Tuple[str, ...]:
         if with_env_loader and self.env_loader:
             remote_cmd = (*self.env_loader, *remote_cmd)
         if self.is_local():
             return tuple(remote_cmd)
         password_args = ["sshpass", "-p", self.password] if self.password else []
-        remote_args = ["ssh", f"{self.user}@{self.address}" if self.user else self.address]
+        remote_args = ["ssh", *(["-tt"] if tt else []), f"{self.user}@{self.address}" if self.user else self.address]
         return (*password_args, *remote_args, shlex.join(remote_cmd))
 
 # TODO: ban unset

@@ -22,10 +22,10 @@ def is_master_online() -> bool:
     return rosgraph.is_master_online() # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
 
 @contextlib.contextmanager
-def prun(command: Sequence[str], force_exit: bool = False, exit_timeout: float = 10, **kwargs: Any):
+def prun(name: str, command: Sequence[str], force_exit: bool = False, exit_timeout: float = 10, **kwargs: Any):
     """
     usage:
-    with prun(["cmd", "arg1", "arg2"], stdout=subprocess.PIPE) as p_task: # spawn a process
+    with prun("my task", ["cmd", "arg1", "arg2"], stdout=subprocess.PIPE) as p_task: # spawn a process
         ... # do some works
         p_task.wait() # wait until done
     # it will try to interrupt the process (SIGINT)
@@ -33,6 +33,7 @@ def prun(command: Sequence[str], force_exit: bool = False, exit_timeout: float =
     """
     process = None
     try:
+        print(f"start {name}...")
         kwargs = {
             "stdin": subprocess.PIPE,
             "stdout": None,
@@ -43,6 +44,7 @@ def prun(command: Sequence[str], force_exit: bool = False, exit_timeout: float =
         process = subprocess.Popen(command, **kwargs)
         yield process
     finally:
+        print(f"stop {name}...")
         if process is not None and process.poll() is None:
             process.send_signal(signal.SIGINT)
             
@@ -139,15 +141,15 @@ def main():
         print("[with_roscore] master is online, just run roslaunch:\n" + shlex.join(command))
         os.execv(command[0], command)
 
-    roscore = master.command(["roscore"])
+    roscore = master.command(["roscore"], tt=True)
     command[1:1] = ["--wait"] # force to wait my roscore
     command = local.command(command)
 
     print("[with_roscore] run roscore:\n" + shlex.join(roscore))
     #                  _________________ to prevent SIGINT propagates into subprocess
-    with prun(roscore, start_new_session=True):
+    with prun("roscore", roscore, start_new_session=True):
         print("[with_roscore] run roslaunch:\n" + shlex.join(command))
-        with prun(command, force_exit=True, exit_timeout=30) as roslaunch_proc:
+        with prun("roslaunch", command, force_exit=True, exit_timeout=30) as roslaunch_proc:
             result_returncode = roslaunch_proc.wait()
     sys.exit(result_returncode)
 
