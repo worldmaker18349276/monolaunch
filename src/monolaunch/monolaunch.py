@@ -30,7 +30,7 @@ from uuid import uuid4
 import yaml
 from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, PathWithJPointer
 from . import monoparam
-from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, LinkAccessTypeWarning, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, LinkAccessTypeWarning, SchemaJSON, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
@@ -297,6 +297,14 @@ class Ctx:
 
         return True
 
+def set_strict():
+    """
+    raise errors for failures of parameter loading/resolving/typechecking instead of warnings.
+    """
+    warnings.filterwarnings("error", category=monoparam.LoadWarning)
+    warnings.filterwarnings("error", category=monoparam.ResolveWarning)
+    warnings.filterwarnings("error", category=monoparam.SchemaWarning)
+
 # -- primitive value types ----------------------------------------------------
 
 @dataclass
@@ -559,43 +567,26 @@ class FromJson(Protocol):
         construct dataclass from json in depth, use default value if fails.
         """
         ...
-FromJsonT = TypeVar("FromJsonT", bound="FromJson")
+    @classmethod
+    def as_schema(cls) -> SchemaJSON:
+        """
+        make schema for the json form.
+        """
+        ...
+FromJsonT = TypeVar("FromJsonT", bound=FromJson)
+JsonValueT = TypeVar("JsonValueT", Type[None], bool, int, float, str, List[JSON], Dict[str, JSON])
 
 @overload
 def get_value(field_or_path: Union[str, Path, PathWithJPointer]) -> JSON: ...
 @overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: None) -> None: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: bool) -> bool: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: int) -> int: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: float) -> float: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: str) -> str: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: List[JSON]) -> List[JSON]: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: Dict[str, JSON]) -> Dict[str, JSON]: ...
+def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: JsonValueT) -> JsonValueT: ...
 @overload
 def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: FromJsonT) -> FromJsonT: ...
 
 @overload
 def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]]) -> JSON: ...
 @overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: None) -> None: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: bool) -> bool: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: int) -> int: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: float) -> float: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: str) -> str: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: List[JSON]) -> List[JSON]: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: Dict[str, JSON]) -> Dict[str, JSON]: ...
+def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: JsonValueT) -> JsonValueT: ...
 @overload
 def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: FromJsonT) -> FromJsonT: ...
 

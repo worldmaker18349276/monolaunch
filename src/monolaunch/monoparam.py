@@ -1156,6 +1156,9 @@ class SourcedNode:
 
                 warnings.warn(SchemaMismatchTypeWarning(self.link, type_, schema.link, schema_type))
 
+    def add_schema(self, schema: SchemaJSON):
+        self.schema.append(SchemaSource(PathWithJPointer(), schema))
+
 class FileAlreadyLoadedError(Exception):
     def __init__(self, filepath: Path):
         self.filepath = filepath

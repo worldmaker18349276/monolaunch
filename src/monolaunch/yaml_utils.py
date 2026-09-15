@@ -75,8 +75,7 @@ you can use `python -m monolaunch.yaml_utils <yaml file>` directly to resolve YA
 from inspect import cleandoc
 import math
 import re
-from typing import Any, Callable, Dict, Generator, Generic, List, Set, Tuple, TypeVar, Union, Optional, cast
-import os.path
+from typing import Any, Dict, Generator, List, Set, Tuple, Union, Optional, cast
 from pathlib import Path
 import urllib.parse
 from dataclasses import dataclass, field
@@ -86,7 +85,7 @@ __all__ = [
     "JSONScalar", "JSON",
     "is_JSON", "assert_JSON",
     "deep_update", "deep_merge", "deep_copy", "deep_eq", "deep_diff", "deep_iter",
-    "FieldAccessError", "JPointer", "PathWithJPointer", "TypedJPointer", "TypedPathWithJPointer",
+    "FieldAccessError", "JPointer", "PathWithJPointer",
     "SimpleYAMLLoader", "load_YAML", "SimpleYAMLDumper", "save_YAML",
     "TaggedScalar", "TaggedDict", "TaggedList", "TaggedJSON",
     "ExYAMLLoader", "load_ExYAML", "ExYAMLDumper", "save_ExYAML",
@@ -471,7 +470,7 @@ class PathWithJPointer:
 
     def resolve(self, base_path: Optional[Path] = None) -> "PathWithJPointer":
         return PathWithJPointer(((base_path or Path()) / self.filepath).resolve(), self.fieldpath)
-    
+
     def __str__(self) -> str:
         filepath = str(self.filepath)
         fieldpath = urlquote(str(self.fieldpath), "#")
@@ -483,70 +482,6 @@ class PathWithJPointer:
     def __repr__(self) -> str:
         return f"PathWithJPointer.parse({str(self)!r})"
 
-@dataclass(frozen=True)
-class AccessorProxy:
-    path: JPointer = field(default_factory=JPointer)
-
-    def __getattr__(self, name: str) -> "AccessorProxy":
-        return AccessorProxy(self.path.append(name))
-
-    def __getitem__(self, key: Union[int, str]) -> "AccessorProxy":
-        return AccessorProxy(self.path.append(key))
-
-T = TypeVar("T")
-U = TypeVar("U")
-
-@dataclass(frozen=True)
-class TypedJPointer(Generic[T], JPointer):
-    @classmethod
-    def create(cls, pointer: JPointer) -> "TypedJPointer[T]":
-        return cls(pointer.elements)
-    
-    def focus(self, accessor: Callable[[T], U]) -> "TypedJPointer[U]":
-        subaccessor = cast(AccessorProxy, accessor(cast(T, AccessorProxy())))
-        subpointer = self.extend(subaccessor.path)
-        return TypedJPointer[U](subpointer.elements)
-
-@dataclass(frozen=True)
-class TypedPathWithJPointer(Generic[T], PathWithJPointer):
-    """
-    allow you to extend link natively and type-safely:
-    ```
-    link = TypedPathWithJPointer[Custom].parse(link_str)
-    sublink = link.focus(lambda data: data.field[2])
-    ```
-    where Custom is the target type after deserialization.
-    note that it only assumes the type statically and doesn't actually check it.
-    """
-    @classmethod
-    def parse(cls, file_field_path: str) -> "TypedPathWithJPointer[T]":
-        link = super(cls).parse(file_field_path)
-        return cls(link.filepath, link.fieldpath)
-
-    @classmethod
-    def create(cls, link: Union[str, Path, PathWithJPointer, "TypedPathWithJPointer[T]"]) -> "TypedPathWithJPointer[T]":
-        if isinstance(link, str):
-            link = cls.parse(link)
-        elif isinstance(link, Path):
-            link = cls(link)
-        else:
-            link = cls(link.filepath, link.fieldpath)
-        return link
-
-    @property
-    def typed_fieldpath(self) -> TypedJPointer[T]:
-        return TypedJPointer[T].create(self.fieldpath)
-    
-    def focus(self, accessor: Callable[[T], U]) -> "TypedPathWithJPointer[U]":
-        """
-        extend the link as if accessing structured class natively.
-        the accessor's input type is annotated as a deserialized type,
-        which allows Python to perform type checking,
-        but it is actually an AccessorProxy.
-        """
-        subaccessor = cast(AccessorProxy, accessor(cast(T, AccessorProxy())))
-        sublink = self.extend(subaccessor.path)
-        return TypedPathWithJPointer[U](sublink.filepath, sublink.fieldpath)
 
 class SimpleYAMLLoader(yaml.SafeLoader):
     """
