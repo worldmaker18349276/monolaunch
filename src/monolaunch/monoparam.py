@@ -887,6 +887,7 @@ class SchemaSource:
 
         return "unknown", None
 
+    @raises(SchemaParseWarning)
     def get_metadata(self) -> SchemaMetadata:
         return SchemaMetadata.parse(self.data)
 
@@ -1141,8 +1142,12 @@ class SourcedNode:
 
                 warnings.warn(SchemaMismatchTypeWarning(self.link, type_, schema.link, schema_type))
 
-    def add_schema(self, schema: SchemaJSON):
-        self.schema.append(SchemaSource(PathWithJPointer(), schema))
+    @raises(SchemaParseWarning)
+    def schema_default(self) -> Optional[JSON]:
+        for schema in self.schema:
+            metadata = schema.get_metadata()
+            if metadata.default is not None:
+                return metadata.default
 
 class FileAlreadyLoadedError(Exception):
     def __init__(self, filepath: Path):
