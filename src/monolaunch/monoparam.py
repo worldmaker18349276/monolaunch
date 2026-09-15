@@ -906,13 +906,22 @@ class SchemaSource:
             return ABSENCE_VALUE
 
 @dataclass(frozen=True)
-class _UnresolvedSchemaSource:
+class UnresolvedSchemaSource:
     """
     schema: root of schema
-    fieldpath: json pointer of data (not schema json) to be traverse
+    fieldpath: json pointer of data (not schema json) we want to traverse to
     """
     schema: SchemaSource
     fieldpath: JPointer = field(default_factory=JPointer)
+
+    def __truediv__(self, key: Union[int, str, JPointer]) -> "UnresolvedSchemaSource":
+        return UnresolvedSchemaSource(self.schema, self.fieldpath / key)
+
+    def append(self, key: Union[int, str]) -> "UnresolvedSchemaSource":
+        return UnresolvedSchemaSource(self.schema, self.fieldpath.append(key))
+
+    def extend(self, subfieldpath: JPointer) -> "UnresolvedSchemaSource":
+        return UnresolvedSchemaSource(self.schema, self.fieldpath.extend(subfieldpath))
 
 @dataclass
 class Source:
@@ -1292,10 +1301,22 @@ class SourceLoader:
         depends.update(depends_)
         return schema_, depends
 
+    @raises(LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
+    def _resolve_schema_list(self, unresolved_schema: List[UnresolvedSchemaSource]) -> Tuple[List[SchemaSource], Set[Path]]:
+        schema_list: List[SchemaSource] = []
+        depends: Set[Path] = set()
+        for i, schema_node in enumerate(unresolved_schema):
+            if schema_node not in unresolved_schema[:i]:
+                schema, depends_ = self._resolve_schema(schema_node.schema, schema_node.fieldpath)
+                depends.update(depends_)
+                if schema is not None:
+                    schema_list.append(schema)
+        return schema_list, depends
+
     @raises(LoadSourceWarning, LoadSchemaWarning, EmptyMergeWarning)
-    def _resolve_sources(self, source: Source, fieldpath: JPointer) -> Tuple[List[Source], List[_UnresolvedSchemaSource], Set[Path]]:
+    def _resolve_sources(self, source: Source, fieldpath: JPointer) -> Tuple[List[Source], List[UnresolvedSchemaSource], Set[Path]]:
         outputs: List[Source] = []
-        unresolved_schema: List[_UnresolvedSchemaSource] = []
+        unresolved_schema: List[UnresolvedSchemaSource] = []
         depends: Set[Path] = set()
         inputs = [(source, fieldpath)]
         while inputs:
@@ -1309,7 +1330,7 @@ class SourceLoader:
                 if source_include is not None:
                     inputs.append((source_include, data.link.fieldpath.extend(fieldpath)))
                 if schema_include is not None:
-                    unresolved_schema.append(_UnresolvedSchemaSource(schema_include, data.link.fieldpath.extend(fieldpath)))
+                    unresolved_schema.append(UnresolvedSchemaSource(schema_include, data.link.fieldpath.extend(fieldpath)))
                 continue
 
             if isinstance(data, Merge):
@@ -1353,14 +1374,9 @@ class SourceLoader:
         depends.update(depends_)
         if not sources: return None, depends
         if raw_schema is not None:
-            unresolved_schema.insert(0, _UnresolvedSchemaSource(raw_schema, src.fieldpath))
-        schema_list: List[SchemaSource] = []
-        for i, schema_node in enumerate(unresolved_schema):
-            if schema_node not in unresolved_schema[:i]:
-                schema, depends_ = self._resolve_schema(schema_node.schema, schema_node.fieldpath)
-                depends.update(depends_)
-                if schema is not None:
-                    schema_list.append(schema)
+            unresolved_schema.insert(0, UnresolvedSchemaSource(raw_schema, src.fieldpath))
+        schema_list, depends_ = self._resolve_schema_list(unresolved_schema)
+        depends.update(depends_)
         return SourcedNode(src, sources, schema_list), depends
 
     @raises(LoadSchemaWarning, SchemaLinkAccessWarning)
@@ -1406,7 +1422,7 @@ class SourceLoader:
             fieldpath = JPointer((str(fieldpath),))
 
         sources: List[Source] = []
-        unresolved_schema = [_UnresolvedSchemaSource(schema, fieldpath) for schema in node.schema]
+        unresolved_schema = [UnresolvedSchemaSource(schema, fieldpath) for schema in node.schema]
         depends: Set[Path] = set()
         for source in node.sources:
             sources_, schema_nodes_, depends_ = self._resolve_sources(source, fieldpath)
@@ -1415,14 +1431,8 @@ class SourceLoader:
             depends.update(depends_)
         if not sources: return None, depends
 
-        schema_list: List[SchemaSource] = []
-        for i, schema_node in enumerate(unresolved_schema):
-            if schema_node not in unresolved_schema[:i]:
-                schema, depends_ = self._resolve_schema(schema_node.schema, schema_node.fieldpath)
-                if schema is not None:
-                    schema_list.append(schema)
-                depends.update(depends_)
-
+        schema_list, depends_ = self._resolve_schema_list(unresolved_schema)
+        depends.update(depends_)
         return SourcedNode(node.link.extend(fieldpath), sources, schema_list), depends
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
