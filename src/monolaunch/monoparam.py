@@ -1242,6 +1242,17 @@ class SourceLoader:
             return None
         return SchemaSource(link, node)
 
+    @raises(FileAlreadyLoadedError)
+    def _new_schema(self, filepath: Optional[Path], schema: SchemaJSON) -> SchemaSource:
+        while filepath is None:
+            filepath = Path("anon_" + str(uuid4()).replace("-", "_") + ".schema.json").resolve()
+            if filepath in self.all_schema:
+                filepath = None
+        if filepath in self.all_schema:
+            raise FileAlreadyLoadedError(filepath)
+        self.all_schema[filepath] = schema
+        return SchemaSource(PathWithJPointer(filepath), schema)
+
     @raises(LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
     def _resolve_schema_ref(self, schema: SchemaSource) -> Tuple[Optional[SchemaSource], Set[Path]]:
         depends: Set[Path] = set()
@@ -1380,6 +1391,18 @@ class SourceLoader:
                     schema_list.append(schema)
         return SourcedNode(src, sources, schema_list), depends
 
+    @raises(LoadSchemaWarning, SchemaLinkAccessWarning)
+    def load_schema(self, schema_src: PathWithJPointer) -> Tuple[Optional[SourcedNode], Set[Path]]:
+        """
+        load schema only, which is represented as a sourced node without source,
+        returns node and file dependencies of current node.
+        """
+        schema_src = PathWithJPointer(schema_src.filepath.resolve(), schema_src.fieldpath)
+        depends = {schema_src.filepath}
+        schema = self._load_schema(schema_src)
+        if schema is None: return None, depends
+        return SourcedNode(PathWithJPointer(), [], [schema]), depends
+
     @raises(FileAlreadyLoadedError)
     def new(self, src: Optional[Path]) -> SourcedNode:
         """
@@ -1390,6 +1413,17 @@ class SourceLoader:
             src = src.resolve()
         source = self._new_source(src)
         return SourcedNode(PathWithJPointer(source.link.filepath), [source], [])
+
+    @raises(FileAlreadyLoadedError)
+    def new_schema(self, schema_src: Optional[Path], schema: SchemaJSON) -> SourcedNode:
+        """
+        make a schema node assigned to given path.
+        this path must be new, or you should remove it from all_schema manually.
+        """
+        if schema_src is not None:
+            schema_src = schema_src.resolve()
+        source = self._new_schema(schema_src, schema)
+        return SourcedNode(PathWithJPointer(), [], [source])
 
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
     def get_(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> Tuple[Optional[SourcedNode], Set[Path]]:
@@ -1480,6 +1514,7 @@ class SourceLoader:
         with warnings.catch_warnings():
             warnings.simplefilter("always")
 
+            if not node.sources: return LinkAccessWarning(node.link)
             for key in fieldpath.elements:
                 type_, _value = node.access()
                 if type_ == "null": break
