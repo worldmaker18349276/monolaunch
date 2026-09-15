@@ -419,9 +419,13 @@ class JPointer:
         node = root
         for i, key in enumerate(self.elements):
             if isinstance(node, dict):
+                if key not in node:
+                    raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
                 node = node[key]
             elif isinstance(node, list):
                 if not self.is_index(key):
+                    raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
+                if int(key) not in range(len(node)):
                     raise FieldAccessError(self[:i+1], f"{type(root).__name__} object")
                 node = node[int(key)]
             else:
