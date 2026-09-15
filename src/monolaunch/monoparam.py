@@ -854,15 +854,15 @@ class SchemaSource:
     """
     
     link: PathWithJPointer
-    node: SchemaJSON
+    data: SchemaJSON
 
     def get_inner(self) -> Optional["SchemaSource"]:
-        if isinstance(self.node, dict) and isinstance(anyOf := self.node.get("anyOf", []), list) and len(anyOf) == 1:
+        if isinstance(self.data, dict) and isinstance(anyOf := self.data.get("anyOf", []), list) and len(anyOf) == 1:
             return SchemaSource(self.link.append("anyOf").append(0), anyOf[0])
         return None
 
     def get_ref(self) -> Optional[PathWithJPointer]:
-        if isinstance(self.node, dict) and isinstance(ref := self.node.get("$ref", None), str):
+        if isinstance(self.data, dict) and isinstance(ref := self.data.get("$ref", None), str):
             return PathWithJPointer.parse(ref) # TODO: our parsing order is different from the standard
         return None
 
@@ -872,21 +872,21 @@ class SchemaSource:
         Literal["any", "struct", "dict", "array", "null", "scalar", "enum", "unknown"],
         Union[None, Dict[str, "SchemaSource"], "SchemaSource", type, List[Any]]
     ]:
-        if isinstance(self.node, dict) and not self.node:
+        if isinstance(self.data, dict) and not self.data:
             return "any", None
 
-        if isinstance(self.node, dict) and isinstance(enum := self.node.get("enum"), list):
+        if isinstance(self.data, dict) and isinstance(enum := self.data.get("enum"), list):
             return "enum", enum
 
-        if isinstance(self.node, dict) and "const" in self.node:
-            return "enum", [self.node["const"]]
+        if isinstance(self.data, dict) and "const" in self.data:
+            return "enum", [self.data["const"]]
 
-        if isinstance(self.node, dict):
-            node_type = self.node.get("type", "")
+        if isinstance(self.data, dict):
+            node_type = self.data.get("type", "")
 
             if (
                 node_type == "object"
-                and isinstance(properties := self.node.get("properties", None), dict)
+                and isinstance(properties := self.data.get("properties", None), dict)
             ):
                 return "struct", {
                     key: SchemaSource(self.link.append("properties").append(key), node)
@@ -895,12 +895,12 @@ class SchemaSource:
 
             if (
                 node_type == "object"
-                and isinstance(additionalProperties := self.node.get("additionalProperties", None), dict)
+                and isinstance(additionalProperties := self.data.get("additionalProperties", None), dict)
             ):
                 return "dict", SchemaSource(self.link.append("additionalProperties"), additionalProperties)
 
-            if node_type == "array" and "items" in self.node:
-                return "array", SchemaSource(self.link.append("items"), self.node["items"])
+            if node_type == "array" and "items" in self.data:
+                return "array", SchemaSource(self.link.append("items"), self.data["items"])
 
             if node_type == "null":
                 return "null", type(None)
@@ -916,7 +916,7 @@ class SchemaSource:
         return "unknown", None
 
     def get_metadata(self) -> SchemaMetadata:
-        return SchemaMetadata.parse(self.node)
+        return SchemaMetadata.parse(self.data)
 
     def resolve_path(self, path: Path) -> Path:
         return (self.link.filepath.parent / path).resolve()
@@ -934,7 +934,11 @@ class SchemaSource:
             return ABSENCE_VALUE
 
 @dataclass(frozen=True)
-class _SchemaNode:
+class _UnresolvedSchemaSource:
+    """
+    schema: root of schema
+    fieldpath: json pointer of data (not schema json) to be traverse
+    """
     schema: SchemaSource
     fieldpath: JPointer = field(default_factory=JPointer)
 
@@ -1151,7 +1155,7 @@ class SourcedNode:
                     else:
                         value = assert_JSON(value)
                     if not self._check_pure_scalar(value, schema):
-                        warnings.warn(SchemaMismatchScalarWarning(self.link, value, schema.link, schema.node))
+                        warnings.warn(SchemaMismatchScalarWarning(self.link, value, schema.link, schema.data))
                     continue
 
                 warnings.warn(SchemaMismatchTypeWarning(self.link, type_, schema.link, schema_type))
@@ -1306,9 +1310,9 @@ class SourceLoader:
         return schema_, depends
 
     @raises(LoadSourceWarning, LoadSchemaWarning, EmptyMergeWarning)
-    def _resolve_sources(self, source: Source, fieldpath: JPointer) -> Tuple[List[Source], List[_SchemaNode], Set[Path]]:
+    def _resolve_sources(self, source: Source, fieldpath: JPointer) -> Tuple[List[Source], List[_UnresolvedSchemaSource], Set[Path]]:
         outputs: List[Source] = []
-        schema_nodes: List[_SchemaNode] = []
+        unresolved_schema: List[_UnresolvedSchemaSource] = []
         depends: Set[Path] = set()
         inputs = [(source, fieldpath)]
         while inputs:
@@ -1322,7 +1326,7 @@ class SourceLoader:
                 if source_include is not None:
                     inputs.append((source_include, data.link.fieldpath.extend(fieldpath)))
                 if schema_include is not None:
-                    schema_nodes.append(_SchemaNode(schema_include, data.link.fieldpath.extend(fieldpath)))
+                    unresolved_schema.append(_UnresolvedSchemaSource(schema_include, data.link.fieldpath.extend(fieldpath)))
                 continue
 
             if isinstance(data, Merge):
@@ -1351,7 +1355,7 @@ class SourceLoader:
             source_key = Source(source.link.append(key), data, key, source.context)
             inputs.append((source_key, fieldpath[1:]))
 
-        return list(reversed(outputs)), list(reversed(schema_nodes)), depends
+        return list(reversed(outputs)), list(reversed(unresolved_schema)), depends
 
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
     def load(self, src: PathWithJPointer) -> Tuple[Optional[SourcedNode], Set[Path]]:
@@ -1362,14 +1366,14 @@ class SourceLoader:
         depends = {src.filepath}
         raw_source, raw_schema = self._load_source(src.filepath, ())
         if raw_source is None: return None, depends
-        sources, schema_nodes, depends_ = self._resolve_sources(raw_source, src.fieldpath)
+        sources, unresolved_schema, depends_ = self._resolve_sources(raw_source, src.fieldpath)
         depends.update(depends_)
         if not sources: return None, depends
         if raw_schema is not None:
-            schema_nodes.insert(0, _SchemaNode(raw_schema, src.fieldpath))
+            unresolved_schema.insert(0, _UnresolvedSchemaSource(raw_schema, src.fieldpath))
         schema_list: List[SchemaSource] = []
-        for i, schema_node in enumerate(schema_nodes):
-            if schema_node not in schema_nodes[:i]:
+        for i, schema_node in enumerate(unresolved_schema):
+            if schema_node not in unresolved_schema[:i]:
                 schema, depends_ = self._resolve_schema(schema_node.schema, schema_node.fieldpath)
                 depends.update(depends_)
                 if schema is not None:
@@ -1396,18 +1400,18 @@ class SourceLoader:
             fieldpath = JPointer((str(fieldpath),))
 
         sources: List[Source] = []
-        schema_nodes = [_SchemaNode(schema, fieldpath) for schema in node.schema]
+        unresolved_schema = [_UnresolvedSchemaSource(schema, fieldpath) for schema in node.schema]
         depends: Set[Path] = set()
         for source in node.sources:
             sources_, schema_nodes_, depends_ = self._resolve_sources(source, fieldpath)
             sources.extend(sources_)
-            schema_nodes.extend(schema_nodes_)
+            unresolved_schema.extend(schema_nodes_)
             depends.update(depends_)
         if not sources: return None, depends
 
         schema_list: List[SchemaSource] = []
-        for i, schema_node in enumerate(schema_nodes):
-            if schema_node not in schema_nodes[:i]:
+        for i, schema_node in enumerate(unresolved_schema):
+            if schema_node not in unresolved_schema[:i]:
                 schema, depends_ = self._resolve_schema(schema_node.schema, schema_node.fieldpath)
                 if schema is not None:
                     schema_list.append(schema)
