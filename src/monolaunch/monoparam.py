@@ -56,34 +56,6 @@ def raises(*exceptions: Type[BaseException]):
         return func
     return decorator
 
-# JSON + Path
-JSONWithPath = Union[None, JSON, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
-# JSON but only Path/PathWithJPointer as scalar
-JSONWithOnlyLink = Union[None, str, Path, PathWithJPointer, List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
-
-def parse_rosparam_path(path: str) -> Tuple[str, ...]:
-    return tuple(e for e in path.strip("/").split("/") if e)
-
-@overload
-def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple[JPointer, Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
-@overload
-def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JPointer, Union[str, Path, PathWithJPointer]], None, None]: ...
-def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JPointer, JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
-    stack = [(JPointer(), folded_dict)]
-    while stack:
-        path, value = stack.pop()
-        if isinstance(value, dict):
-            for subpath in list(value.keys()):
-                stack.append((path.extend(JPointer(parse_rosparam_path(subpath))), value[subpath]))
-        elif isinstance(value, list):
-            for key in range(len(value)):
-                stack.append((path.append(key), value[key]))
-        elif value is None:
-            # skip None
-            pass
-        else:
-            yield path, value
-
 # JSON + Resource/Include/Merge, specially for Source
 SourcedJSON = Union[
     None,
@@ -1592,57 +1564,56 @@ class SourceLoader:
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning, LinkAccessWarning,
             IncompatibleMergeWarning, NotScalarNodeWarning,
             InvalidScalarWarning)
-    def update(self, node: SourcedNode, folded_dict: JSONWithPath, machine: str = ""):
+    def update(self, node: SourcedNode, path: JPointer, value: Union[JSONScalar, Path], machine: str = ""):
         """
-        update sourced node by folded dictionary (keys are field paths, values are scalars).
+        update sourced node.
         only the file of current top layer will be mutated.
-        null will be skipped, it doesn't mean deletion.
         warning will be raised if a field is invalid to access.
         values can be paths, which will be converted to !resource, attached with machine information.
 
         <!> this may invalidate other sourced node.
         """
-        for path, value in JSONLike_deep_iter(folded_dict):
-            subnode = self._ensure_top_along(node, path, False)
-            if subnode is None:
-                continue
-            if not isinstance(value, (bool, int, float, str, Path)): # pyright: ignore[reportUnnecessaryIsInstance]
-                warnings.warn(InvalidScalarWarning(value))
-                continue
-            if isinstance(value, Path):
-                value = Resource.create(value)
-                if machine:
-                    value = self.sync_resource_manager.attach_machine(value, machine)
-            type_, _value = subnode.access()
-            if not (type_ == "scalar" or type_ == "null"):
-                warnings.warn(NotScalarNodeWarning(subnode.link))
-                continue
-            subnode.sources[-1].data = value
+        subnode = self._ensure_top_along(node, path, False)
+        if subnode is None:
+            return
+        if not isinstance(value, (bool, int, float, str, Path)): # pyright: ignore[reportUnnecessaryIsInstance]
+            warnings.warn(InvalidScalarWarning(value))
+            return
+        if isinstance(value, Path):
+            value_ = Resource.create(value)
+            if machine:
+                value_ = self.sync_resource_manager.attach_machine(value_, machine)
+        else:
+            value_ = value
+        type_, _value = subnode.access()
+        if not (type_ == "scalar" or type_ == "null"):
+            warnings.warn(NotScalarNodeWarning(subnode.link))
+            return
+        subnode.sources[-1].data = value_
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning, LinkAccessWarning)
-    def include(self, node: SourcedNode, folded_dict: JSONWithOnlyLink, machine: str = ""):
+    def include(self, node: SourcedNode, path: JPointer, value: Union[str, Path, PathWithJPointer], machine: str = ""):
         """
-        insert include sourced node by folded dictionary (keys are field paths, values are include paths).
+        insert include into sourced node.
         only the file of current top layer will be mutated.
         warning will be raised if a field is invalid to access.
         values must be paths, which will be converted to !include, attached with machine information.
 
         <!> this may invalidate other sourced node.
         """
-        for path, value in JSONLike_deep_iter(folded_dict):
-            subnode = self._ensure_top_along(node, path, True)
-            if subnode is None:
-                continue
-            source = subnode.sources[-1]
-            assert source.data is None
-            if not isinstance(value, (str, Path, PathWithJPointer)): # pyright: ignore[reportUnnecessaryIsInstance]
-                warnings.warn(InvalidIncludeWarning(value))
-                continue
-            else:
-                include = Include.create(value)
-                if machine:
-                    include = self.sync_resource_manager.attach_machine(include, machine)
-                source.data = include
+        subnode = self._ensure_top_along(node, path, True)
+        if subnode is None:
+            return
+        source = subnode.sources[-1]
+        assert source.data is None
+        if not isinstance(value, (str, Path, PathWithJPointer)): # pyright: ignore[reportUnnecessaryIsInstance]
+            warnings.warn(InvalidIncludeWarning(value))
+            return
+        else:
+            include = Include.create(value)
+            if machine:
+                include = self.sync_resource_manager.attach_machine(include, machine)
+            source.data = include
 
 def resolve_YAML(link: PathWithJPointer) -> JSON:
     """
@@ -1933,15 +1904,16 @@ class YAMLSynchronizer:
                 if (sourced_node := self.original.loader.all_includes.get(depend, ABSENCE_VALUE)) is not ABSENCE_VALUE
             }
 
-            update: JSONWithPath = {}
+            update: Dict[JPointer, Union[JSONScalar, Path]] = {}
             for key, value in resolved_diff.items():
                 if value is None:
                     # TODO: try to delete standalone (not-merged) field
                     warnings.warn(UnsupportedDeletionSynchronizationWarning(key))
                 else:
-                    update[str(key)] = value
+                    update[key] = cast(JSONScalar, value)
             assert self.original.node is not None
-            self.original.loader.update(self.original.node, update)
+            for key, value in update.items():
+                self.original.loader.update(self.original.node, key, value)
 
             for depend in old_original_sources.keys():
                 old = old_original_sources[depend]

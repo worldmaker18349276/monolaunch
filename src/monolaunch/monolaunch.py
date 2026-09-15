@@ -19,7 +19,7 @@ import re
 import traceback
 import warnings
 import xml.etree.ElementTree as ET
-from typing import Any, Callable, Dict, KeysView, List, Literal, Optional, Tuple, Sequence, Type, TypeVar, Union, cast, overload, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Generator, KeysView, List, Literal, Optional, Tuple, Sequence, Type, TypeVar, Union, cast, overload, Protocol, runtime_checkable
 from pathlib import Path
 from dataclasses import MISSING, dataclass, field
 from collections import ChainMap
@@ -28,9 +28,9 @@ import os
 import shlex
 from uuid import uuid4
 import yaml
-from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, PathWithJPointer
+from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, PathWithJPointer
 from . import monoparam
-from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, LinkAccessTypeWarning, SchemaJSON, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import LinkAccessWarning, LinkAccessTypeWarning, SchemaJSON, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
@@ -44,6 +44,34 @@ __all__ = [
     "as_bool",
 ]
 
+
+# JSON + Path
+JSONWithPath = Union[None, JSON, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
+# JSON but only Path/PathWithJPointer as scalar
+JSONWithOnlyLink = Union[None, str, Path, PathWithJPointer, List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
+
+def parse_rosparam_path(path: str) -> Tuple[str, ...]:
+    return tuple(e for e in path.strip("/").split("/") if e)
+
+@overload
+def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple[JPointer, Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
+@overload
+def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JPointer, Union[str, Path, PathWithJPointer]], None, None]: ...
+def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JPointer, JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
+    stack = [(JPointer(), folded_dict)]
+    while stack:
+        path, value = stack.pop()
+        if isinstance(value, dict):
+            for subpath in list(value.keys()):
+                stack.append((path.extend(JPointer(parse_rosparam_path(subpath))), value[subpath]))
+        elif isinstance(value, list):
+            for key in range(len(value)):
+                stack.append((path.append(key), value[key]))
+        elif value is None:
+            # skip None
+            pass
+        else:
+            yield path, value
 
 # -- build context ------------------------------------------------------------
 
@@ -197,9 +225,11 @@ class Ctx:
             self.param_node = self.param_loader.new(self.params_filepath)
         assert self.param_node is not None
         if is_load:
-            self.param_loader.include(self.param_node, cast(JSONWithOnlyLink, param), str(machine))
+            for path, value in JSONLike_deep_iter(cast(JSONWithOnlyLink, param)):
+                self.param_loader.include(self.param_node, path, value, str(machine))
         else:
-            self.param_loader.update(self.param_node, cast(JSONWithPath, param), str(machine))
+            for path, value in JSONLike_deep_iter(cast(JSONWithPath, param)):
+                self.param_loader.update(self.param_node, path, value, str(machine))
 
     def get_value(self, link: PathWithJPointer) -> JSON:
         if not link.filepath.is_absolute():
