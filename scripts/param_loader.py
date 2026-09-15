@@ -19,7 +19,7 @@ def main(source: Path, update_rate: float):
     sync = YAMLSynchronizer(source, source_resolved)
     sync.init()
 
-    def update(diff: Dict[FieldPath, Optional[JSON]]):
+    def update(diff: Dict[PathWithJPointer, Optional[JSON]]):
         nonlocal pub
         for path, value in diff.items():
             if value is None:

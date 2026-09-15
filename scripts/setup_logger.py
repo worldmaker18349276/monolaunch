@@ -18,7 +18,7 @@ import re
 import sys
 from typing import Dict, Literal, Optional, Tuple
 
-from monolaunch.yaml_utils import JSON, FieldPath
+from monolaunch.yaml_utils import JSON, JPointer
 
 
 def sanitize_identifier(name: str) -> str:
@@ -31,7 +31,7 @@ def ros_home():
     import rospkg # pyright: ignore[reportMissingImports]
     return Path(rospkg.get_ros_home()) # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
 
-def get_param(path: FieldPath) -> JSON:
+def get_param(path: JPointer) -> JSON:
     import rospy # pyright: ignore[reportMissingImports]
     return rospy.get_param(str(path)) # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportReturnType]
 
@@ -114,7 +114,7 @@ def generate_logger_config(logger_config: LoggerConfig) -> Tuple[str, str]:
     )
     return python_logging_conf_content, rosconsole_config_content
 
-def get_logger_config(fieldpath: FieldPath) -> LoggerConfig:
+def get_logger_config(fieldpath: JPointer) -> LoggerConfig:
     try:
         logger_config = get_param(fieldpath)
     except KeyError:
@@ -128,16 +128,16 @@ def get_logger_config(fieldpath: FieldPath) -> LoggerConfig:
 
 ROS_LOGGER_CONFIG_FIELDNAME = "$ros_logger_config"
 
-def determine_ros_logger_config_fieldpath() -> Optional[FieldPath]:
+def determine_ros_logger_config_fieldpath() -> Optional[JPointer]:
     ros_namespace = os.environ.get("ROS_NAMESPACE")
     name = next((arg[len("__name:="):] for arg in sys.argv[::-1] if arg.startswith("__name:=")), None)
     ns = next((arg[len("__ns:="):] for arg in sys.argv[::-1] if arg.startswith("__ns:=")), None)
     ns = ns or ros_namespace
     if name is None or ns is None:
         return None
-    return FieldPath.parse(ns).append(name).append(ROS_LOGGER_CONFIG_FIELDNAME)
+    return JPointer.parse(ns).append(name).append(ROS_LOGGER_CONFIG_FIELDNAME)
 
-def setup_logger(fieldpath: FieldPath):
+def setup_logger(fieldpath: JPointer):
     ros_logger_config = get_logger_config(fieldpath)
     if ros_logger_config:
         python_logging_conf_content, rosconsole_config_content = generate_logger_config(ros_logger_config)
