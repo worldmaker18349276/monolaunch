@@ -19,9 +19,9 @@ import re
 import traceback
 import warnings
 import xml.etree.ElementTree as ET
-from typing import Any, Callable, Dict, Generator, KeysView, List, Literal, Optional, Tuple, Sequence, Type, TypeVar, Union, cast, overload, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Generator, KeysView, List, Literal, Optional, Tuple, Sequence, Type, Union, cast, overload
 from pathlib import Path
-from dataclasses import MISSING, dataclass, field
+from dataclasses import dataclass, field
 from collections import ChainMap
 import sys
 import os
@@ -30,7 +30,7 @@ from uuid import uuid4
 import yaml
 from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, PathWithJPointer
 from . import monoparam
-from .monoparam import LinkAccessWarning, LinkAccessTypeWarning, SchemaJSON, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import SchemaJSON, SchemaSource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
@@ -72,6 +72,32 @@ def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JPointer, JSONScala
             pass
         else:
             yield path, value
+
+
+@dataclass(frozen=True)
+class TypedPathWithJPointer:
+    """
+    schema describes the type of root node of link.filepath,
+    and all types along link.fieldpath must match.
+    """
+    link: PathWithJPointer
+    schema: SchemaSource = field(default_factory=lambda: SchemaSource(PathWithJPointer(), {}))
+
+    def __truediv__(self, key: Union[int, str, JPointer]) -> "TypedPathWithJPointer":
+        return TypedPathWithJPointer(self.link / key, self.schema)
+
+    def append(self, key: Union[int, str]) -> "TypedPathWithJPointer":
+        return TypedPathWithJPointer(self.link.append(key), self.schema)
+
+    def extend(self, subfieldpath: JPointer) -> "TypedPathWithJPointer":
+        return TypedPathWithJPointer(self.link.extend(subfieldpath), self.schema)
+
+    def resolve(self, base_path: Optional[Path] = None) -> "TypedPathWithJPointer":
+        return TypedPathWithJPointer(self.link.resolve(base_path), self.schema)
+
+    def __str__(self) -> str:
+        return str(self.link)
+
 
 # -- build context ------------------------------------------------------------
 
@@ -231,14 +257,19 @@ class Ctx:
             for path, value in JSONLike_deep_iter(cast(JSONWithPath, param)):
                 self.param_loader.update(self.param_node, path, value, str(machine))
 
-    def get_value(self, link: PathWithJPointer) -> JSON:
-        if not link.filepath.is_absolute():
-            raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link}, you may want to use dirname()")
-        tmp_param_node, _depends = self.param_loader.load(link)
+    def get_value(self, link: TypedPathWithJPointer) -> JSON:
+        if not link.link.filepath.is_absolute():
+            raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link.link.filepath}, you may want to use dirname()")
+        tmp_param_node, _depends = self.param_loader.load(PathWithJPointer(link.link.filepath))
         if tmp_param_node is None:
-            raise FieldAccessError(link.fieldpath, str(link.filepath))
+            raise FieldAccessError(JPointer(), str(link.link.filepath))
+        if link.schema.data != {}:
+            tmp_param_node.schema.insert(0, link.schema)
+        tmp_param_node = self.param_loader.get(tmp_param_node, link.link.fieldpath)
+        if tmp_param_node is None:
+            raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
         res, _depends = self.param_loader.resolve_all(tmp_param_node)
-        # TODO: lock this param, since generated launch file depends on it now
+        # TODO: get schema_default
         return res
 
     # remap
@@ -588,76 +619,25 @@ def sanitize_identifier(name: str) -> str:
 def anon(name: str) -> str:
     return name + "_" + str(uuid4()).replace("-", "_")
 
-FromJsonSelf = TypeVar("FromJsonSelf", bound="FromJson")
-@runtime_checkable
-class FromJson(Protocol):
-    @classmethod
-    def from_json(cls: Type[FromJsonSelf], data: JSON) -> FromJsonSelf:
-        """
-        construct dataclass from json in depth, use default value if fails.
-        """
-        ...
-    @classmethod
-    def as_schema(cls) -> SchemaJSON:
-        """
-        make schema for the json form.
-        """
-        ...
-FromJsonT = TypeVar("FromJsonT", bound=FromJson)
-JsonValueT = TypeVar("JsonValueT", Type[None], bool, int, float, str, List[JSON], Dict[str, JSON])
 
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer]) -> JSON: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: JsonValueT) -> JsonValueT: ...
-@overload
-def get_value(field_or_path: Union[str, Path, PathWithJPointer], fallback: FromJsonT) -> FromJsonT: ...
+def with_schema(link: Union[str, Path, PathWithJPointer], schema: Union[str, Path, SchemaJSON]) -> TypedPathWithJPointer:
+    if isinstance(schema, (str, Path)):
+        schema = cast(SchemaJSON, {"$ref": str(schema)})
+    return TypedPathWithJPointer(PathWithJPointer.create(link), SchemaSource(PathWithJPointer(), schema))
 
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]]) -> JSON: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: JsonValueT) -> JsonValueT: ...
-@overload
-def get_value(field_or_path: Tuple[JSON, Union[str, JPointer]], fallback: FromJsonT) -> FromJsonT: ...
-
-def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Union[str, JPointer]]], fallback: JSON = MISSING) -> JSON: # pyright: ignore[reportInconsistentOverload, reportArgumentType]
-    if not isinstance(field_or_path, tuple):
-        if isinstance(field_or_path, PathWithJPointer):
-            link = field_or_path
-        elif isinstance(field_or_path, Path):
-            link = PathWithJPointer(field_or_path)
-        else:
-            link = PathWithJPointer.parse(field_or_path)
-
-        get_value_ = lambda: ctx().get_value(link)
-
+def get_value(field_or_path: Union[str, Path, PathWithJPointer, TypedPathWithJPointer]) -> JSON:
+    if isinstance(field_or_path, TypedPathWithJPointer):
+        link = field_or_path
+    elif isinstance(field_or_path, PathWithJPointer):
+        link = TypedPathWithJPointer(field_or_path)
+    elif isinstance(field_or_path, Path):
+        link = TypedPathWithJPointer(PathWithJPointer(field_or_path))
+    elif isinstance(field_or_path, str): # pyright: ignore[reportUnnecessaryIsInstance]
+        link = TypedPathWithJPointer(PathWithJPointer.parse(field_or_path))
     else:
-        if isinstance(field_or_path[1], JPointer):
-            fieldpath = field_or_path[1]
-        else:
-            fieldpath = JPointer.parse(field_or_path[1])
-        link = PathWithJPointer(Path("<python object>"), fieldpath)
+        assert False
+    return ctx().get_value(link)
 
-        get_value_ = lambda: fieldpath.walk(field_or_path[0])
-
-    if fallback is MISSING: # pyright: ignore[reportUnnecessaryComparison]
-        return get_value_()
-
-    try:
-        res = get_value_()
-    except FieldAccessError as err:
-        warnings.warn(LinkAccessWarning(PathWithJPointer(link.filepath, err.path)))
-        res = None
-
-    if isinstance(fallback, FromJson):
-        res = fallback.from_json(res)
-        return res
-
-    if res is None or not isinstance(res, type(fallback)):
-        if res is not None:
-        warnings.warn(LinkAccessTypeWarning(link, type(res), type(fallback)))
-        res = fallback
-    return res
 
 def set_param(json: JSONWithPath):      ctx().set_param(json)
 def load_param(json: JSONWithOnlyLink): ctx().load_param(json)
