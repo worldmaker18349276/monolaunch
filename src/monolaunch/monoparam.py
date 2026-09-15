@@ -460,6 +460,15 @@ class ABSENCE(Enum):
     VALUE = "absence"
 ABSENCE_VALUE = ABSENCE.VALUE
 
+WARNING_VERBOSE = False
+
+def _link_to_str(link: Union[Path, PathWithJPointer]) -> str:
+    if WARNING_VERBOSE:
+        return str(link)
+    if isinstance(link, Path):
+        return link.name
+    else:
+        return str(PathWithJPointer(Path(link.filepath.name), link.fieldpath))
 
 class LoadWarning(Warning):
     pass
@@ -469,21 +478,21 @@ class LoadSourceWarning(LoadWarning):
         self.path = path
 
     def __str__(self):
-        return f"fail to load YAML, file: {self.path.relative_to(Path.cwd())}\n" + (f"\n{self.__cause__}" if self.__cause__ else "")
+        return f"fail to load YAML, file: {_link_to_str(self.path)}\n" + (f"\n{self.__cause__}" if self.__cause__ else "")
 
 class LoadSchemaWarning(LoadWarning):
     def __init__(self, link: PathWithJPointer):
         self.link = link
 
     def __str__(self):
-        return f"fail to load schema, file: {self.link.relative_to(Path.cwd())}" + (f"\n{self.__cause__}" if self.__cause__ else "")
+        return f"fail to load schema, file: {_link_to_str(self.link)}" + (f"\n{self.__cause__}" if self.__cause__ else "")
 
 class SchemaRefLoopWarning(LoadWarning):
     def __init__(self, link: PathWithJPointer):
         self.link = link
 
     def __str__(self):
-        return f"schema refs form a loop: {self.link.relative_to(Path.cwd())}"
+        return f"schema refs form a loop: {_link_to_str(self.link)}"
 
 class SchemaParseWarning(LoadWarning):
     def __init__(self, value: Any, expected: Union[type, Tuple[type, ...]]):
@@ -498,7 +507,7 @@ class SchemaLinkAccessWarning(LoadWarning):
         self.link = link
     
     def __str__(self):
-        relpath = self.link.relative_to(Path.cwd())
+        relpath = _link_to_str(self.link)
         # if str(relpath.filepath).startswith(".."):
         #     relpath = self.link
         return f"fail to access {relpath} in schema"
@@ -511,10 +520,19 @@ class LinkAccessWarning(AccessWarning):
         self.link = link
     
     def __str__(self):
-        relpath = self.link.relative_to(Path.cwd())
-        # if str(relpath.filepath).startswith(".."):
-        #     relpath = self.link
-        return f"fail to access {relpath}"
+        return f"fail to access {_link_to_str(self.link)}"
+
+class LinkAccessTypeWarning(AccessWarning):
+    def __init__(self, value_link: PathWithJPointer, value_type: type, expected_type: type):
+        self.value_link = value_link
+        self.value_type = value_type
+        self.expected_type = expected_type
+    
+    def __str__(self):
+        return (
+            f"field {_link_to_str(self.value_link)} ({self.value_type.__name__})"
+            f" doesn't match expected type {self.expected_type.__name__}"
+        )
 
 class InvalidScalarWarning(AccessWarning):
     def __init__(self, value: Any):
@@ -535,8 +553,8 @@ class SchemaMismatchTypeWarning(SchemaWarning):
     
     def __str__(self):
         return (
-            f"field {self.value_link.relative_to(Path.cwd())} ({self.value_type})"
-            f" doesn't match schema {self.schema_link.relative_to(Path.cwd())} ({self.schema_type})"
+            f"field {_link_to_str(self.value_link)} ({self.value_type})"
+            f" doesn't match schema {_link_to_str(self.schema_link)} ({self.schema_type})"
         )
 
 class SchemaMismatchStructWarning(SchemaWarning):
@@ -548,8 +566,8 @@ class SchemaMismatchStructWarning(SchemaWarning):
     
     def __str__(self):
         return (
-            f"map keys of field {self.value_link.relative_to(Path.cwd())}"
-            f" doesn't match map keys of schema {self.schema_link.relative_to(Path.cwd())}\n"
+            f"map keys of field {_link_to_str(self.value_link)}"
+            f" doesn't match map keys of schema {_link_to_str(self.schema_link)}\n"
             f"  additional keys: {self.additional_keys or {}}\n"
             f"  missing keys: {self.missing_keys or {}}"
         )
@@ -563,8 +581,8 @@ class SchemaMismatchScalarWarning(SchemaWarning):
     
     def __str__(self):
         return (
-            f"field {self.value_link.relative_to(Path.cwd())} ({self.value!r})"
-            f" doesn't match schema {self.schema_link.relative_to(Path.cwd())} ({self.schema!r})"
+            f"field {_link_to_str(self.value_link)} ({self.value!r})"
+            f" doesn't match schema {_link_to_str(self.schema_link)} ({self.schema!r})"
         )
 
 class ResolveWarning(Warning):
@@ -579,8 +597,8 @@ class IncompatibleMergeWarning(ResolveWarning):
     
     def __str__(self):
         return "incompatible types to merge:\n  left: {} as {}\n  right: {} as {}".format(
-            str(self.left_link.relative_to(Path.cwd())), self.left_type,
-            str(self.right_link.relative_to(Path.cwd())), self.right_type,
+            str(_link_to_str(self.left_link)), self.left_type,
+            str(_link_to_str(self.right_link)), self.right_type,
         )
 
 class NotScalarNodeWarning(ResolveWarning):
@@ -588,7 +606,7 @@ class NotScalarNodeWarning(ResolveWarning):
         self.link = link
     
     def __str__(self):
-        return f"node {self.link.relative_to(Path.cwd())} is not a scalar"
+        return f"node {_link_to_str(self.link)} is not a scalar"
 
 class InvalidIncludeWarning(ResolveWarning):
     def __init__(self, value: Any):
@@ -602,7 +620,7 @@ class EmptyMergeWarning(ResolveWarning):
         self.link = link
     
     def __str__(self):
-        return f"!merge list cannot be empty: at {self.link.relative_to(Path.cwd())!s}"
+        return f"!merge list cannot be empty: at {_link_to_str(self.link)!s}"
 
 class SyncResourceWarning(Warning):
     pass

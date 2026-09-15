@@ -471,10 +471,6 @@ class PathWithJPointer:
 
     def resolve(self, base_path: Optional[Path] = None) -> "PathWithJPointer":
         return PathWithJPointer(((base_path or Path()) / self.filepath).resolve(), self.fieldpath)
-
-    def relative_to(self, path: Path) -> "PathWithJPointer":
-        """left divide"""
-        return PathWithJPointer(Path(os.path.relpath(self.filepath, path)), self.fieldpath)
     
     def __str__(self) -> str:
         filepath = str(self.filepath)

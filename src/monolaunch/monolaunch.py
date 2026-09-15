@@ -30,7 +30,7 @@ from uuid import uuid4
 import yaml
 from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, PathWithJPointer
 from . import monoparam
-from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import JSONWithOnlyLink, JSONWithPath, JSONLike_deep_iter, LinkAccessWarning, LinkAccessTypeWarning, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
@@ -550,18 +550,6 @@ def sanitize_identifier(name: str) -> str:
 def anon(name: str) -> str:
     return name + "_" + str(uuid4()).replace("-", "_")
 
-class LinkAccessTypeWarning(Warning):
-    def __init__(self, value_link: PathWithJPointer, value_type: type, expected_type: type):
-        self.value_link = value_link
-        self.value_type = value_type
-        self.expected_type = expected_type
-    
-    def __str__(self):
-        return (
-            f"field {self.value_link.relative_to(Path.cwd())} ({self.value_type.__name__})"
-            f" doesn't match expected type {self.expected_type.__name__}"
-        )
-
 FromJsonSelf = TypeVar("FromJsonSelf", bound="FromJson")
 @runtime_checkable
 class FromJson(Protocol):
@@ -644,7 +632,8 @@ def get_value(field_or_path: Union[str, Path, PathWithJPointer, Tuple[JSON, Unio
         res = fallback.from_json(res)
         return res
 
-    if not isinstance(res, type(fallback)):
+    if res is None or not isinstance(res, type(fallback)):
+        if res is not None:
         warnings.warn(LinkAccessTypeWarning(link, type(res), type(fallback)))
         res = fallback
     return res
@@ -1004,6 +993,9 @@ def run(launch_func: Callable[[], None]) -> Any:
     if launch_func.__globals__["__name__"] != "__main__":
         return launch_func
     # only run on main
+    def formatwarning(message: str, category: Type[Warning], _filename: Any, _lineno: Any, _file:Any=None, _line:Any=None):
+        return f"{category.__name__}: {message}\n"
+    warnings.formatwarning = formatwarning
     cmd = _run(launch_func)
     cmd()
 
