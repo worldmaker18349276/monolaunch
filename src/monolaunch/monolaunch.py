@@ -261,15 +261,18 @@ class Ctx:
         if not link.link.filepath.is_absolute():
             raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link.link.filepath}, you may want to use dirname()")
         tmp_param_node, _depends = self.param_loader.load(PathWithJPointer(link.link.filepath))
-        if tmp_param_node is None:
+        if not bool(tmp_param_node):
             raise FieldAccessError(JPointer(), str(link.link.filepath))
         if link.schema.data != {}:
             tmp_param_node.schema.insert(0, link.schema)
+
         tmp_param_node = self.param_loader.get(tmp_param_node, link.link.fieldpath)
-        if tmp_param_node is None:
+        if not bool(tmp_param_node):
+            default = tmp_param_node.schema_default()
+            if default is not None:
+                return default
             raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
         res, _depends = self.param_loader.resolve_all(tmp_param_node)
-        # TODO: get schema_default
         return res
 
     # remap
