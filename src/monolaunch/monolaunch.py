@@ -279,7 +279,8 @@ class Ctx:
             fieldpath = fieldpath[:-1]
 
         tmp_param_node = self.param_loader.get(tmp_param_node, fieldpath)
-        if not bool(tmp_param_node):
+        is_absence = not bool(tmp_param_node) or tmp_param_node.access()[0] == "null"
+        if is_absence:
             if attr == "__class__":
                 schema_type = tmp_param_node.schema_type()
                 if schema_type is None:
