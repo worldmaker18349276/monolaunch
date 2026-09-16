@@ -991,11 +991,15 @@ class SourcedNode:
     """
     link: PathWithJPointer
     sources: List[Source]
-    # assert not isinstance(source.data, (Include, Merge))
+    # assert all(not isinstance(source.data, (Include, Merge)) source in self.sources)
     schema: List[SchemaSource]
 
     def __bool__(self):
-        return bool(self.sources)
+        return self.is_accessible
+
+    @property
+    def is_accessible(self) -> bool:
+        return len(self.sources) > 0
     
     def print(self, stream: Optional[IO[str]] = None):
         stream = stream if stream is not None else sys.stdout
@@ -1480,7 +1484,7 @@ class SourceLoader:
             for key in value:
                 subnode, depends_ = self.get_(node, key)
                 depends.update(depends_)
-                if not bool(subnode): continue
+                if not subnode.is_accessible: continue
                 res[key], depends_ = self.resolve_all(subnode, sync_resources)
                 depends.update(depends_)
             return res, depends
@@ -1490,7 +1494,7 @@ class SourceLoader:
             for index in value:
                 subnode, depends_ = self.get_(node, index)
                 depends.update(depends_)
-                if not bool(subnode): continue
+                if not subnode.is_accessible: continue
                 res_, depends_ = self.resolve_all(subnode, sync_resources)
                 res.append(res_)
                 depends.update(depends_)
@@ -1517,14 +1521,14 @@ class SourceLoader:
         with warnings.catch_warnings():
             warnings.simplefilter("always")
 
-            if not bool(node): return LinkAccessWarning(node.link)
+            if not node.is_accessible: return LinkAccessWarning(node.link)
             for key in fieldpath.elements:
                 type_, _value = node.access()
                 if type_ == "null": break
                 if type_ == "seq" and not JPointer.is_index(key):
                     return LinkAccessWarning(PathWithJPointer(node.link.filepath, node.link.fieldpath.append(key)))
                 node_ = self.get(node, key)
-                if not bool(node_): break
+                if not node_.is_accessible: break
                 node = node_
 
         return None
@@ -1588,7 +1592,7 @@ class SourceLoader:
                     source.data = Merge([source.data, None])
 
             node_ = self.get(node, key)
-            assert bool(node_)
+            assert node_.is_accessible
             node = node_
 
         return node
@@ -1659,7 +1663,7 @@ def resolve_YAML(link: PathWithJPointer) -> JSON:
 
     data = None
     node, _depends = loader.load(link)
-    if bool(node):
+    if node.is_accessible:
         data, _depends = loader.resolve_all(node)
 
     return data
@@ -1725,7 +1729,7 @@ class YAMLWatcher:
 
         sync_resources: List[SyncInfo] = []
         data = None
-        if bool(node):
+        if node.is_accessible:
             data, depends_ = self.loader.resolve_all(node, sync_resources)
             depends.update(depends_)
 
@@ -1734,7 +1738,7 @@ class YAMLWatcher:
             for depend in [*self.loader.all_includes.keys(), *self.loader.all_schema.keys()]
         }
         
-        if not bool(node): return
+        if not node.is_accessible: return
         if skip_empty:
             data = deep_copy_skip_empty(data)
         if aggregate_sync_resources:
