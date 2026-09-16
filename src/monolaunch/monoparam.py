@@ -990,9 +990,12 @@ class SourcedNode:
     the field path may walk into included YAML file.
     """
     link: PathWithJPointer
-    sources: List[Source] # assert len(self.sources) > 0
+    sources: List[Source]
     # assert not isinstance(source.data, (Include, Merge))
     schema: List[SchemaSource]
+
+    def __bool__(self):
+        return bool(self.sources)
     
     def print(self, stream: Optional[IO[str]] = None):
         stream = stream if stream is not None else sys.stdout
@@ -1367,17 +1370,16 @@ class SourceLoader:
         return list(reversed(outputs)), list(reversed(unresolved_schema)), depends
 
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
-    def load(self, src: PathWithJPointer) -> Tuple[Optional[SourcedNode], Set[Path]]:
+    def load(self, src: PathWithJPointer) -> Tuple[SourcedNode, Set[Path]]:
         """
         load yaml file, returns node and file dependencies of current node.
         """
         src = PathWithJPointer(src.filepath.resolve(), src.fieldpath)
         depends = {src.filepath}
         raw_source, raw_schema = self._load_source(src.filepath, ())
-        if raw_source is None: return None, depends
+        if raw_source is None: return SourcedNode(src, [], []), depends
         sources, unresolved_schema, depends_ = self._resolve_sources(raw_source, src.fieldpath)
         depends.update(depends_)
-        if not sources: return None, depends
         if raw_schema is not None:
             unresolved_schema.insert(0, UnresolvedSchemaSource(raw_schema, src.fieldpath))
         schema_list, depends_ = self._resolve_schema_list(unresolved_schema)
@@ -1419,7 +1421,7 @@ class SourceLoader:
         return SourcedNode(PathWithJPointer(), [], [source])
 
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
-    def get_(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> Tuple[Optional[SourcedNode], Set[Path]]:
+    def get_(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> Tuple[SourcedNode, Set[Path]]:
         """
         resolve given node until given path. returns the node of given path and its dependencies, or None for failure.
         """
@@ -1434,14 +1436,13 @@ class SourceLoader:
             sources.extend(sources_)
             unresolved_schema.extend(schema_nodes_)
             depends.update(depends_)
-        if not sources: return None, depends
 
         schema_list, depends_ = self._resolve_schema_list(unresolved_schema)
         depends.update(depends_)
         return SourcedNode(node.link.extend(fieldpath), sources, schema_list), depends
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
-    def get(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> Optional[SourcedNode]:
+    def get(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> SourcedNode:
         """
         resolve given node until given path. returns the node of given path, or None for failure.
         """
@@ -1464,7 +1465,7 @@ class SourceLoader:
             for key in value:
                 subnode, depends_ = self.get_(node, key)
                 depends.update(depends_)
-                if subnode is None: continue
+                if not bool(subnode): continue
                 res[key], depends_ = self.resolve_all(subnode, sync_resources)
                 depends.update(depends_)
             return res, depends
@@ -1474,7 +1475,7 @@ class SourceLoader:
             for index in value:
                 subnode, depends_ = self.get_(node, index)
                 depends.update(depends_)
-                if subnode is None: continue
+                if not bool(subnode): continue
                 res_, depends_ = self.resolve_all(subnode, sync_resources)
                 res.append(res_)
                 depends.update(depends_)
@@ -1501,14 +1502,14 @@ class SourceLoader:
         with warnings.catch_warnings():
             warnings.simplefilter("always")
 
-            if not node.sources: return LinkAccessWarning(node.link)
+            if not bool(node): return LinkAccessWarning(node.link)
             for key in fieldpath.elements:
                 type_, _value = node.access()
                 if type_ == "null": break
                 if type_ == "seq" and not JPointer.is_index(key):
                     return LinkAccessWarning(PathWithJPointer(node.link.filepath, node.link.fieldpath.append(key)))
                 node_ = self.get(node, key)
-                if node_ is None: break
+                if not bool(node_): break
                 node = node_
 
         return None
@@ -1532,6 +1533,7 @@ class SourceLoader:
         for i, key in enumerate(fieldpath.elements):
             is_last_key = i == len(fieldpath.elements) - 1
 
+            assert len(node.sources) > 0
             data = node.sources[-1].data
             if data is None:
                 if JPointer.is_index(key):
@@ -1571,7 +1573,7 @@ class SourceLoader:
                     source.data = Merge([source.data, None])
 
             node_ = self.get(node, key)
-            assert node_ is not None
+            assert bool(node_)
             node = node_
 
         return node
@@ -1604,6 +1606,7 @@ class SourceLoader:
         if not (type_ == "scalar" or type_ == "null"):
             warnings.warn(NotScalarNodeWarning(subnode.link))
             return
+        assert len(subnode.sources) > 0
         subnode.sources[-1].data = value_
 
     @raises(LoadSourceWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning, LinkAccessWarning)
@@ -1619,6 +1622,7 @@ class SourceLoader:
         subnode = self._ensure_top_along(node, path, True)
         if subnode is None:
             return
+        assert len(subnode.sources) > 0
         source = subnode.sources[-1]
         assert source.data is None
         if not isinstance(value, (str, Path, PathWithJPointer)): # pyright: ignore[reportUnnecessaryIsInstance]
@@ -1640,7 +1644,7 @@ def resolve_YAML(link: PathWithJPointer) -> JSON:
 
     data = None
     node, _depends = loader.load(link)
-    if node is not None:
+    if bool(node):
         data, _depends = loader.resolve_all(node)
 
     return data
@@ -1706,7 +1710,7 @@ class YAMLWatcher:
 
         sync_resources: List[SyncInfo] = []
         data = None
-        if node is not None:
+        if bool(node):
             data, depends_ = self.loader.resolve_all(node, sync_resources)
             depends.update(depends_)
 
@@ -1715,7 +1719,7 @@ class YAMLWatcher:
             for depend in [*self.loader.all_includes.keys(), *self.loader.all_schema.keys()]
         }
         
-        if node is None: return
+        if not bool(node): return
         if skip_empty:
             data = deep_copy_skip_empty(data)
         if aggregate_sync_resources:
