@@ -19,7 +19,7 @@ import re
 import traceback
 import warnings
 import xml.etree.ElementTree as ET
-from typing import Any, Callable, Dict, Generator, KeysView, List, Literal, Optional, Tuple, Sequence, Type, Union, cast, overload
+from typing import Any, Callable, Dict, Generator, KeysView, List, Literal, Optional, Tuple, Sequence, Type, TypeVar, Union, cast, overload
 from pathlib import Path
 from dataclasses import dataclass, field
 from collections import ChainMap
@@ -30,13 +30,14 @@ from uuid import uuid4
 import yaml
 from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, PathWithJPointer
 from . import monoparam
-from .monoparam import SchemaJSON, SchemaSource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import LinkAccessTypeWarning, SchemaJSON, SchemaSource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
     "run",
     "group", "node", "include", "master",
-    "set_param", "load_param", "get_value",
+    "set_param", "load_param", "get_value", "with_schema",
+    "TypedPathWithJPointer",
     "load_logger", "set_logger",
     "remap", "set_env",
     "machine",
@@ -48,7 +49,7 @@ __all__ = [
 # JSON + Path
 JSONWithPath = Union[None, JSON, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
 # JSON but only Path/PathWithJPointer as scalar
-JSONWithOnlyLink = Union[None, str, Path, PathWithJPointer, List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
+JSONWithOnlyLink = Union[None, str, Path, PathWithJPointer, "TypedPathWithJPointer", List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
 
 def parse_rosparam_path(path: str) -> Tuple[str, ...]:
     return tuple(e for e in path.strip("/").split("/") if e)
@@ -56,7 +57,7 @@ def parse_rosparam_path(path: str) -> Tuple[str, ...]:
 @overload
 def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple[JPointer, Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JPointer, Union[str, Path, PathWithJPointer]], None, None]: ...
+def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JPointer, Union[str, Path, PathWithJPointer, "TypedPathWithJPointer"]], None, None]: ...
 def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JPointer, JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
     stack = [(JPointer(), folded_dict)]
     while stack:
@@ -242,6 +243,8 @@ class Ctx:
                     is_absolute = Path(value).is_absolute()
                 elif isinstance(value, PathWithJPointer):
                     is_absolute = value.filepath.is_absolute()
+                elif isinstance(value, TypedPathWithJPointer):
+                    is_absolute = value.link.filepath.is_absolute()
                 else:
                     is_absolute = False
                 if not is_absolute:
@@ -252,6 +255,8 @@ class Ctx:
         assert self.param_node is not None
         if is_load:
             for path, value in JSONLike_deep_iter(cast(JSONWithOnlyLink, param)):
+                if isinstance(value, TypedPathWithJPointer):
+                    value = value.link
                 self.param_loader.include(self.param_node, path, value, str(machine))
         else:
             for path, value in JSONLike_deep_iter(cast(JSONWithPath, param)):
@@ -337,10 +342,10 @@ class Ctx:
         return merged
 
     # logger
-    def load_logger(self, link: PathWithJPointer):
+    def load_logger(self, link: TypedPathWithJPointer):
         if not self.scopes:
             raise NoTopLevelScopeError()
-        self.scopes[-1].logger.append(link)
+        self.scopes[-1].logger.append(link.link)
 
     def set_logger(self, config: LoggerConfig):
         if not self.scopes:
@@ -623,24 +628,34 @@ def anon(name: str) -> str:
     return name + "_" + str(uuid4()).replace("-", "_")
 
 
-def with_schema(link: Union[str, Path, PathWithJPointer], schema: Union[str, Path, SchemaJSON]) -> TypedPathWithJPointer:
+def with_schema(path: Path, schema: Union[str, Path, SchemaJSON]) -> TypedPathWithJPointer:
     if isinstance(schema, (str, Path)):
         schema = cast(SchemaJSON, {"$ref": str(schema)})
-    return TypedPathWithJPointer(PathWithJPointer.create(link), SchemaSource(PathWithJPointer(), schema))
+    return TypedPathWithJPointer(PathWithJPointer(path), SchemaSource(PathWithJPointer(), schema))
 
-def get_value(field_or_path: Union[str, Path, PathWithJPointer, TypedPathWithJPointer]) -> JSON:
-    if isinstance(field_or_path, TypedPathWithJPointer):
-        link = field_or_path
-    elif isinstance(field_or_path, PathWithJPointer):
-        link = TypedPathWithJPointer(field_or_path)
-    elif isinstance(field_or_path, Path):
-        link = TypedPathWithJPointer(PathWithJPointer(field_or_path))
-    elif isinstance(field_or_path, str): # pyright: ignore[reportUnnecessaryIsInstance]
-        link = TypedPathWithJPointer(PathWithJPointer.parse(field_or_path))
+JsonValueT = TypeVar("JsonValueT", Type[None], bool, int, float, str, List[JSON], Dict[str, JSON])
+
+@overload
+def get_value(link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer]) -> JSON: ...
+@overload
+def get_value(link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer], expected_type: Type[JsonValueT]) -> JsonValueT: ...
+
+def get_value(link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer], expected_type: Optional[Type[JSON]] = None) -> JSON: # pyright: ignore[reportInconsistentOverload]
+    if isinstance(link, TypedPathWithJPointer):
+        pass
+    elif isinstance(link, PathWithJPointer):
+        link = TypedPathWithJPointer(link)
+    elif isinstance(link, Path):
+        link = TypedPathWithJPointer(PathWithJPointer(link))
+    elif isinstance(link, str): # pyright: ignore[reportUnnecessaryIsInstance]
+        link = TypedPathWithJPointer(PathWithJPointer.parse(link))
     else:
-        assert False
-    return ctx().get_value(link)
+        raise TypeError(type(link))
 
+    res = ctx().get_value(link)
+    if expected_type is not None and type(res) != expected_type:
+        raise LinkAccessTypeWarning(link.link, type(res), expected_type)
+    return res
 
 def set_param(json: JSONWithPath):      ctx().set_param(json)
 def load_param(json: JSONWithOnlyLink): ctx().load_param(json)
@@ -802,20 +817,22 @@ def resolve_logger_config(logger_config: JSON) -> LoggerConfig:
             raise TypeError(f"expect 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL', got {level}")
     return cast(LoggerConfig, logger_config)
 
-def load_logger(config_link: Union[str, Path, PathWithJPointer]) -> None:
+def load_logger(config_link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer]) -> None:
     """
     load ros logger config in a scope (apply to nodes in the scope).
     
     about config format, see `set_logger`.
     """
     if isinstance(config_link, str):
-        config_link = PathWithJPointer.parse(config_link)
+        config_link = TypedPathWithJPointer(PathWithJPointer.parse(config_link))
     elif isinstance(config_link, Path):
-        config_link = PathWithJPointer(config_link)
-    elif isinstance(config_link, PathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
-        config_link = config_link
+        config_link = TypedPathWithJPointer(PathWithJPointer(config_link))
+    elif isinstance(config_link, PathWithJPointer):
+        config_link = TypedPathWithJPointer(config_link)
+    elif isinstance(config_link, TypedPathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
+        pass
     else:
-        raise TypeError
+        raise TypeError(type(config_link))
 
     ctx().load_logger(config_link)
 
