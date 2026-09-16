@@ -959,7 +959,7 @@ FILENAME_EXPR = """
 
 AUTO_RELAUNCH_WITH_ROSCORE_EXPR = """
 (
-    True
+    dry_run == 0
     and not __import__('os').getenv('NO_RELAUNCH_WITH_ROSCORE', '')
     and not __import__('os').putenv('NO_RELAUNCH_WITH_ROSCORE', '1')
     and (
@@ -1017,8 +1017,8 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
         launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_expr", default=AUTO_RELAUNCH_WITH_ROSCORE_EXPR)))
         launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_res", default="$(eval eval(auto_relaunch_with_roscore_expr))")))
 
+        # add param resolver
         if param_node:
-            # add param resolver
             launch_el.append(ET.Element("arg", dict(
                 name="source_param_pointer",
                 default="$(arg filename)#xpointer(/launch/rosparam[@param='/'])",
@@ -1032,20 +1032,21 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
             param_el.text = yaml.dump(param, Dumper=SourcedYAMLDumper, sort_keys=False)
             launch_el.append(param_el)
 
-            # dry_run == 2
-            dry_run_2 = ET.Element("group", {"if": "$(eval dry_run == 2)"})
-            dry_run_2.append(ET.Element("node", dict(error="run until resolving param because dry_run == 2")))
-            launch_el.append(dry_run_2)
+        # dry_run == 2
+        dry_run_2 = ET.Element("group", {"if": "$(eval dry_run == 2)"})
+        dry_run_2.append(ET.Element("node", dict(error="run until resolving param because dry_run == 2")))
+        launch_el.append(dry_run_2)
 
-            # add resource loader
+        # add resource loader
+        if param_node:
             sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param + '#/$sync_resources')"
             launch_el.append(ET.Element("arg", dict(name="sync_resources_expr", default=sync_resources_expr)))
             launch_el.append(ET.Element("arg", dict(name="sync_resources", default="$(eval eval(sync_resources_expr))")))
 
-            # dry_run == 3
-            dry_run_3 = ET.Element("group", {"if": "$(eval dry_run == 3)"})
-            dry_run_3.append(ET.Element("node", dict(error="run until sync resources because dry_run == 3")))
-            launch_el.append(dry_run_3)
+        # dry_run == 3
+        dry_run_3 = ET.Element("group", {"if": "$(eval dry_run == 3)"})
+        dry_run_3.append(ET.Element("node", dict(error="run until sync resources because dry_run == 3")))
+        launch_el.append(dry_run_3)
         
         # add <machine>
         for machine in ctx().machines.values():
