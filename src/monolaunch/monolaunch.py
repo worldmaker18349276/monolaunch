@@ -271,14 +271,47 @@ class Ctx:
         if link.schema.data != {}:
             tmp_param_node.schema.insert(0, link.schema)
 
-        tmp_param_node = self.param_loader.get(tmp_param_node, link.link.fieldpath)
+        # special attr
+        attr = None
+        fieldpath = link.link.fieldpath
+        if len(fieldpath.elements) > 0 and  fieldpath.elements[-1] in ("__class__", "__len__", "__keys__"):
+            attr = fieldpath.elements[-1]
+            fieldpath = fieldpath[:-1]
+
+        tmp_param_node = self.param_loader.get(tmp_param_node, fieldpath)
         if not bool(tmp_param_node):
             default = tmp_param_node.schema_default()
             if default is not None:
                 return default
             raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
-        res, _depends = self.param_loader.resolve_all(tmp_param_node)
-        return res
+
+        if attr == "__class__":
+            type_, value = tmp_param_node.access()
+            if type_ == "null":
+                return "NoneType"
+            elif type_ == "seq":
+                return "list"
+            elif type_ == "map":
+                return "dict"
+            elif type_ == "scalar":
+                return type(value).__name__
+            else:
+                assert False
+        elif attr == "__len__":
+            type_, value = tmp_param_node.access()
+            if type_ != "seq":
+                raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+            assert isinstance(value, range)
+            return len(value)
+        elif attr == "__keys__":
+            type_, value = tmp_param_node.access()
+            if type_ != "map":
+                raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+            assert isinstance(value, list)
+            return cast(JSON, value)
+        else:
+            res, _depends = self.param_loader.resolve_all(tmp_param_node)
+            return res
 
     # remap
     def _get_mapping(self) -> Tuple[KeysView[str], Callable[[str], Optional[str]]]:
