@@ -1151,6 +1151,21 @@ class SourcedNode:
             metadata = schema.get_metadata()
             if metadata.default is not None:
                 return metadata.default
+            type_, value = schema.access()
+            if type_ == "array":
+                return []
+            elif type_ == "struct":
+                assert isinstance(value, dict)
+                return {key: None for key in value.keys()}
+            elif type_ == "dict":
+                return {}
+            elif type_ == "null":
+                return None
+
+    @raises(SchemaParseWarning)
+    def schema_type(self) -> Optional[Literal["any", "struct", "dict", "array", "null", "scalar", "enum", "unknown"]]:
+        for schema in self.schema:
+            return schema.access()[0]
 
 class FileAlreadyLoadedError(Exception):
     def __init__(self, filepath: Path):

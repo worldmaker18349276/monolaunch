@@ -42,7 +42,7 @@ __all__ = [
     "remap", "set_env",
     "machine",
     "env", "find", "anon", "ns", "dirname", "launch_prefix",
-    "as_bool",
+    "as_bool", "set_strict",
 ]
 
 
@@ -280,38 +280,67 @@ class Ctx:
 
         tmp_param_node = self.param_loader.get(tmp_param_node, fieldpath)
         if not bool(tmp_param_node):
-            default = tmp_param_node.schema_default()
-            if default is not None:
-                return default
-            raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+            if attr == "__class__":
+                schema_type = tmp_param_node.schema_type()
+                if schema_type is None:
+                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                SCHEMATYPE_TO_CLASSNAME = {
+                    "struct": "dict",
+                    "dict": "dict",
+                    "array": "list",
+                    "null": "NoneType",
+                }
+                return SCHEMATYPE_TO_CLASSNAME.get(schema_type, "any")
+                
+            elif attr == "__len__":
+                default = tmp_param_node.schema_default()
+                if not isinstance(default, list):
+                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                return len(default)
 
-        if attr == "__class__":
-            type_, value = tmp_param_node.access()
-            if type_ == "null":
-                return "NoneType"
-            elif type_ == "seq":
-                return "list"
-            elif type_ == "map":
-                return "dict"
-            elif type_ == "scalar":
-                return type(value).__name__
+            elif attr == "__keys__":
+                default = tmp_param_node.schema_default()
+                if not isinstance(default, dict):
+                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                return list(default.keys())
+
             else:
-                assert False
-        elif attr == "__len__":
-            type_, value = tmp_param_node.access()
-            if type_ != "seq":
-                raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
-            assert isinstance(value, range)
-            return len(value)
-        elif attr == "__keys__":
-            type_, value = tmp_param_node.access()
-            if type_ != "map":
-                raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
-            assert isinstance(value, list)
-            return cast(JSON, value)
+                default = tmp_param_node.schema_default()
+                if default is None:
+                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                return default
+
         else:
-            res, _depends = self.param_loader.resolve_all(tmp_param_node)
-            return res
+            if attr == "__class__":
+                type_, value = tmp_param_node.access()
+                if type_ == "null":
+                    return "NoneType"
+                elif type_ == "seq":
+                    return "list"
+                elif type_ == "map":
+                    return "dict"
+                elif type_ == "scalar":
+                    return type(value).__name__
+                else:
+                    assert False
+
+            elif attr == "__len__":
+                type_, value = tmp_param_node.access()
+                if type_ != "seq":
+                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                assert isinstance(value, range)
+                return len(value)
+
+            elif attr == "__keys__":
+                type_, value = tmp_param_node.access()
+                if type_ != "map":
+                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                assert isinstance(value, list)
+                return cast(JSON, value)
+
+            else:
+                res, _depends = self.param_loader.resolve_all(tmp_param_node)
+                return res
 
     # remap
     def _get_mapping(self) -> Tuple[KeysView[str], Callable[[str], Optional[str]]]:
