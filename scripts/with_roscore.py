@@ -8,53 +8,16 @@ with_roscore.py --filename <launch_file.launch> roslaunch ...
 import contextlib
 from pathlib import Path
 import shlex
-import subprocess
-import signal
 import sys
 import os
-from typing import Any, Optional, Sequence, Tuple
-from monolaunch.monoresource import Machine
+from typing import Optional, Tuple
+from monolaunch.monoresource import Machine, prun
 import xml.etree.ElementTree as ET
 
 
 def is_master_online() -> bool:
     import rosgraph # pyright: ignore[reportMissingImports]
     return rosgraph.is_master_online() # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-
-@contextlib.contextmanager
-def prun(name: str, command: Sequence[str], force_exit: bool = False, exit_timeout: float = 10, **kwargs: Any):
-    """
-    usage:
-    with prun("my task", ["cmd", "arg1", "arg2"], stdout=subprocess.PIPE) as p_task: # spawn a process
-        ... # do some works
-        p_task.wait() # wait until done
-    # it will try to interrupt the process (SIGINT)
-    # if force_exit is True, kill it after {exit_timeout} sec
-    """
-    process = None
-    try:
-        print(f"start {name}...")
-        kwargs = {
-            "stdin": subprocess.PIPE,
-            "stdout": None,
-            "stderr": subprocess.STDOUT,
-            "text": True,
-            **kwargs,
-        }
-        process = subprocess.Popen(command, **kwargs)
-        yield process
-    finally:
-        print(f"stop {name}...")
-        if process is not None and process.poll() is None:
-            process.send_signal(signal.SIGINT)
-            
-            try:
-                process.wait(timeout=exit_timeout)
-            except subprocess.TimeoutExpired:
-                if not force_exit: raise
-                print(f"[with_roscore] fail to interrupt process {command}, will kill it")
-                process.kill()
-                process.wait()
 
 def _get_local_and_master_machine(launch_file: Path) -> Tuple[Machine, Optional[Machine], str]:
     root = ET.parse(launch_file).getroot()
