@@ -123,9 +123,7 @@ the basic structure is the same, almost every tag has a corresponding function:
 | `set_param(dict)`                     | `<param>`.                                                             |
 | `load_param(dict)`                    | `<rosparam>`, load parameters from file, support json pointer.         |
 | `get_value("file.yaml#/sub/field")`   | get value from given yaml file.                                        |
-| `get_value((json_obj, "sub/field"))`  | get value from object directly.                                        |
-| `get_value("file.yaml#/sub/field", fallback)` |  if value is missing or type doesn't match fallback,           |
-|                                       | fallback value will be returned.                                       |
+| `get_value("file.yaml#/sub/field", type)` |  if type doesn't match, error will be raised.                      |
 | `with machine(name, address, ...)`    | `<machine>` with scope, set machine as default in a scope.             |
 |                                       | for your convenience, you can pass in url like                         |
 |                                       | "machine://user:pswd@addr/path/to/env_loader.sh" directly.             |

@@ -1,6 +1,6 @@
 # Mechanisms
 
-this document explains all the mechanisms in detail, including how bad the launch xml format is.
+this document explains all the mechanisms in detail, including how bad the launch xml format is, and why my design like this way.
 
 ## Process
 launch script has two phases: generation phase and launch phase:
@@ -235,6 +235,128 @@ to use this function, user need to launch param_loader on launcher machine:
 with node(pkg="monolaunch", type="param_loader.py", ...):
     pass
 ```
+<!-- TODO: fix me -->
+
+
+## get_value
+one can also read data from yaml file.
+note that parameters cannot be read directly after `set_param`/`load_param` in monolaunch,
+because the actual parameters are set during the launch phase.
+however, you can extract data from a yaml file and then set it as a parameter
+```python
+subfield = get_value("file/path/to/userconfig.yaml#/sub/field", int)
+set_param({ "sub/field": subfield + 1 })
+```
+where `int` ensures the type of `subfield`.
+with `get_value`, control flow of launching can be changed from user configuration.
+
+note that getting value from the root will resolve all contents in depth
+```python
+userconfig = get_value("file/path/to/userconfig.yaml", dict)
+set_param({ "sub/field": userconfig["sub"]["field"] + 1 })
+```
+this is not a good pattern, since now the code potentially depends on all configurations.
+it is recommended to use `load_param` to load specific part from the link,
+so that changed configuration take effect after generation phase.
+if you only need property of structure, use special field:
+```python
+keys = get_value("file/path/to/userconfig.yaml#/sub/struct/__keys__", list) # get keys of map
+length = get_value("file/path/to/userconfig.yaml#/sub/list/__len__", int) # get length of seq
+typename = get_value("file/path/to/userconfig.yaml#/sub/data/__class__", str) # get type name of field
+```
+
+we provide json pointer class, it can be extended like `pathlib.Path`
+```python
+userconfig = PathWithJPointer.parse("file/path/to/userconfig.yaml")
+subfield = userconfig / "sub" / "field"
+set_param({ "sub/field": get_value(subfield, int) })
+load_param({ "sub/field": subfield })
+```
+furthermore, it can be attached with json shema
+```python
+userconfig = PathWithJPointer.parse("file/path/to/userconfig.yaml").with_schema("file/path/to/user.schema.json")
+subfield = userconfig / "sub" / "field"
+set_param({ "sub/field": get_value(subfield, int) })
+load_param({ "sub/field": subfield })
+```
+now when you `get_value` and `load_param`, the value will be checked by schema.
+note that due to presence of type information,
+correct default value will be contructed if the field is absence or null.
+moreover, scalar default value described by schema will be used.
+you should define default values in the json schema, instead of writing the magic number directly in the code.
+
+yaml files can be annotated directly with schema.
+simply add `$schema: path/to/your.schema.json` to the root level in the yaml file,
+and lsp and monoparam will recognize it.
+parameter resolver will recognized schema and try to check the type during resolving.
+warnings will be raised if it doesn't match.
+
+we only support a specific form of json schema:
+```
+<schema>  = {                             // struct
+              "type": "object",
+              "properties": {
+                (<string>: <schema>,)*
+              }
+            }
+          | {                             // dict
+              "type": "object",
+              "additionalProperties": <schema>
+            }
+          | {                             // array
+              "type": "array",
+              "items": <schema>
+            }
+          | { "type": "null" }            // null
+          | {                             // scalar
+              "type": "boolean" | "integer" | "number" | "string"
+            }
+          | { "enum": [ (<json>,)* ] }    // enumerated values
+          | { "const": <json> }           // constant values
+          | { "anyOf": [ <schema> ] }     // wrap
+          | { "$ref": <path> }            // ref
+          | {}                            // any
+```
+each `<schema>` can have additional properties for metadata:
+```
+<metadata>  = {
+                ("description": <string>,)?
+                ("oneOf": [ ({ "const": <json> },)* ],)?
+                ("default": <json>,)?
+                ("minimum": <number>,)?
+                ("maximum": <number>,)?
+              }
+```
+struct and dict are for map, but struct must have fixed numbers of keys,
+and you cannot mix struct and dict;
+only one case is allowed in anyOf, it is just for wrapping up a schema so that additional metadata can be attached.
+
+this schema format is designed for mapping between json and static typed structure,
+especially for my another library `structmapper`, which supports structure (de)serializing in c++ and python.
+`structmapper` can export types as json schema, which can then be used here.
+`get_value` with json schema should behave just like `structmapper`.
+it is not my style to define config schema separately like dynamic_reconfigure.
+configuration and usage are closely related and should be defined directly in the code.
+
+json schema allows the advantages of type checking to be realized in data format and resolver.
+monolaunch doesn't use static type checking because it is hard to integrate typing between multiple languages.
+on the other hand, with json schema, external types can be included (dynamically) in any language.
+
+another reason is:
+I want to nerf the use of deserialization, otherwise the utility of `load_param` will be greatly reduced.
+it is clearly that parsing full configuration directly is easier
+```python
+my_config = MyConfig.from_json(my_config_link) # read data and statically type checked 
+set_param({
+    "config": my_config.node_config, # this become easier and statically type checked
+})
+load_param({
+    "config": my_config_link / "node_config", # this is relatively harder and dynamically type checked
+})
+```
+however, `load_param` is the better for the future use:
+don't resolve config in the generation phase, include it, so that you can change it before launch phase.
+the ease of full deserializing becomes a trap here.
 
 
 ## Logger
@@ -422,9 +544,6 @@ they should be in put into private namespace of the node requires them.
 monoparam will translate them to resource uri, like `ros_home://<relative path to ROS_HOME>`,
 so to access those reosurces, just get the resolved resource uri from param server.
 
-resources are synchronized by monoresource, one can run it by yourself via
-`python -m monolaunch.monoresource <resolved param file>#/$sync_resources`.
-
 
 ## Launch Prefix
 a node process accepts four types of inputs: environmental variables, command arguments, ros parameters and files.
@@ -500,16 +619,36 @@ base:
   b: 2
 ```
 where the path can be an absolute path or a path relative to the file containing the statement.
-it also can be a json pointer
+it also can be appended with a json pointer
 ```yaml
 base: !include base.yaml#/key/2/item
 ```
-where string `key` and `item` represent map access, number `2` represents sequence access.
-there are some limit on pointer:
-- key of map cannot be a string that look like number, otherwise it will be confused in pointer.
-- key of map cannot be empty, which is unrepresentable in pointer: `/a//b` is the same as `/a/b`.
-- key of map cannot contain letter '/' and '#'.
-- key can contain spaces or newlines, but please don't.
+note that the path is relative to the absolute path of this file,
+so you can safely symlink this file to any location.
+for example, assume you have a global network setting
+```yaml
+# file: network.yaml
+local: !include local.yaml
+worker1: !include worker1.yaml
+worker2: !include worker2.yaml
+```
+it includes multiple setting files under the same directory.
+you have another configuration file for certain application
+```yaml
+# file: src/my_package/config/setting.yaml
+my_package:
+  ...
+network: !include network.yaml
+```
+you don't need to copy all network settings here;
+just create a symlink to the network setting file in the root directory:
+```
+# file: src/my_package/config/network.yaml (symlink)
+../../../network.yaml
+```
+the resolver will look for the files `local.yaml`, `worker1.yaml`, and `worker2.yaml`
+next to the absolute path of `src/my_package/config/network.yaml`,
+not under `src/my_package/config`.
 
 the functionality of `!include` allows you to manage configuration structurally.
 our recommended design is:
@@ -519,10 +658,10 @@ launch script then distributes each part to private namespace of each node.
 monolaunch will resolve all redistributed configurations into another yaml file.
 
 the advantages of this design are obvious:
-- smaller configuration files are more readable and reusable
-- single input yaml file is easy to manage, single resolved yaml file is easy to debug
-- configurations should be separated based on purpose (single responsibility principle)
-- separation of user configurations and launcher configurations  
+- smaller configuration files are more readable and reusable.
+- single input yaml file is easy to search; single resolved yaml file is easy to debug.
+- configurations should be separated based on purpose (single responsibility principle).
+- separation of user configurations and launcher configurations.  
   the reason for designing user configurations first and then redistributing them to establish launcher configurations,
   rather than directly asking users to provide launcher configurations, is because:
   - launcher configurations are usually not suitable for user.
@@ -571,18 +710,42 @@ config:
   timeout: 30
   retries: 3
 ```
+the nested structures will be merged in depth,
+```yaml
+config: !merge
+  - optimizer:
+      use_BA: false
+      buffer_size: 10
+    controller:
+      timeout: 10
+      retries: 3
+  - optimizer:
+      use_BA: true
+    controller:
+      timeout: 30
+```
+resolve to:
+```yaml
+config:
+  optimizer:
+    use_BA: true
+    buffer_size: 10
+  controller:
+    timeout: 30
+    retries: 3
+```
 rules are simple:
 - null <> any = any <> null = any   --  null behaves like empty slot
 - scalar <> scalar = later one
-- seq <> seq = zip longest with <>
 - map <> map = union zip with <>
+- seq <> seq = zip longest with <>  --  just think of seq as a mapping of consecutive number keys
 - non-null type <> another non-null type = later one
 
 command `rosparam load` also has merging behavior, but it is slightly different from !merge.
 rosparam cannot access sequence through index, even if sequence contain more than just scalars.
 similarly, rosparam treats sequence as a scalar during merge; it just replaces all contents of sequence.
 I think rosparam's seq merging rule is better for configuration,
-but I stick to current rule for now since it is more symmetrical.
+but I stick to current rule since it is more symmetrical.
 
 in our context, `!merge` is used for modifying/extending part of existing configuration without touching original file,
 but not any kind of modification can be done via `!merge`.
@@ -621,6 +784,22 @@ the position of an element is meaningless, but it will affect the merge result.
 thus, additive set of items cannot be represented under this merging rules.
 for rosparam's merging rule, additive behavior still cannot be made,
 but overriding full set does make sense in another aspect.
+you can use map keys as set instead:
+```yaml
+!merge
+- flag_set:
+    flag1: true
+    flag2: true
+- flag_set:
+    flag4: true
+```
+resolve to correct one
+```yaml
+flag_set:
+  flag1: true
+  flag2: true
+  flag4: true
+```
 
 similarly, it also doesn't make sense for sequence that represents order:
 ```yaml
@@ -633,6 +812,16 @@ similarly, it also doesn't make sense for sequence that represents order:
     ...
 ```
 however, this is fine for rosparam's merging rule.
+you should use single string
+```yaml
+!merge
+- stereo_depth:
+    filter_order: "decimate,median,bilateral"
+    ...
+- stereo_depth:
+    filter_order: "bilateral,decimate"
+    ...
+```
 
 another example, assume you have a set of cameras, which have configurations stored as a sequence
 ```yaml
@@ -647,25 +836,71 @@ another example, assume you have a set of cameras, which have configurations sto
 ```
 under our merging rules, it is impossible to remove one of camera, or replace both completely to single camera.
 if you use rosparam merging rules, now the problem becomes you cannot override single property of one of camera.
-in this case, sequence is a bad design, you should use map instead, so that each camera can be referenced correctly.
+you should use map instead, so that each camera can be referenced with proper name.
 
 a good design principle is: don't use sequence in configuration, always use map.
 if you must use seq, then only include scalars.
-for vector, use `{x: 1, y: 2, z: 3}`;
-for quaternion, use `{x: 1, y: 2, z: 3, w: 4}`;
-for set of cameras, use `{cam0: ..., cam1: ...}`.
-the only exception is matrix: `[[1, 0], [0, 1]]`.
+the only exception is matrices: no one would be happy to write `{m00: 1, m01: 0, m10: 0, m11: 1}` instead of `[[1, 0], [0, 1]]`.
 
-even if we cannot change merging rule for vector, quaternion or somthing that should be treated as scalar,
-as long as types are matched, their values will be merged correctly.
 
 ## Resource
-...
+`!resource` tag is used for transferring resource across nodes in different machines,
+it can be followed by a string in the form:
+- file://{path_to_resource}
+- package://{pkg_name}/{path_to_resource}
+- ros_home://{path_to_resource}
 
+file URI is the file path relative to current location (directory of the file contains this term);
+package URI refers to the workspace overlay where this item being read;
+ros_home URI refers to the ros home of current runtime when this item being used.
 
-## Context
-...
+resource URI should be transformed properly after switching carrier, otherwise the meanings may change.
+file URI should not be shared across machine since it is local resource;
+package URI can be shared across machine as long as they have the same overlay;
+ros_home URI is a runtime resource and should be prepared before each run on given machine.
 
+monoparam will rewrite local file URI as ros_home URI,
+and collect all synchronization tasks then hand over to monoresource.
+this is done by parameter resolver,
+that means the path you get during the launch script and in the node are different.
+with this mechanism, you can reference local files in your yaml file as a !resource,
+and in any node run on any machine, you can read that file through the resolved resource URI.
 
-## Schema
-...
+to make a single resource URI that is accessible on any machine,
+a meaningful, generic path prefix is needed, and `$ROS_HOME` is the most suitable.
+however, we don't allow environmental variable appear in the path, otherwise the meaning becomes runtime dependent.
+ros_home URI is invented for this purpose: it opens a special case for `$ROS_HOME`, and anyone can understand it at a glance.
+
+local resources will be synchronized to the machine when it is loaded/set into monolaunch,
+that is,
+```python
+with machine_1:
+    set_param({"file": Path(file_path)})  # file will be synced to machine_1
+with machine_2:
+    load_param({"config": Link.parse(config_link)})  # resources in config_link will be synced to machine_2
+```
+to make parameter resolver know that information (synchronization tasks are built by parameter resolver),
+we also attach some context onto `!include` and `!resource`,
+```yaml
+file: !resource file://path/to/local.png?runtime_machine=machine://...
+config: !include path/to/config.yaml#/sub/field?runtime_machine=machine://...
+```
+where the query string contains all necessary information for synchronization.
+note that the syntax is slightly different from the standard URL.
+the context will be inherited during resolving inclusion,
+so all contained resources will be synchronized to that machine.
+it is just for resolver, it should be eliminated after resolving.
+
+we will warn the case of the synchronized resource URI being assigned to
+the private namespace of a node run on the different machine.
+best practice is to always set up resources within the private scope of the nodes that need these files:
+```python
+with machine_1:
+    with node_1:
+        set_param({"file": Path(file_path)})  # file will be synced to the machine of node_1, that is, machine_1
+```
+even if two nodes use the same resources, they should be configured separately.
+we cannot restrict users to using only this method,
+because `set_param` and `load_param` can also be used elsewhere,
+and we cannot check it without look into included yaml files.
+
