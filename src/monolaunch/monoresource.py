@@ -3,7 +3,10 @@ sync resources before launch, so that resources can be managed in single place.
 
 it uses commands: ssh, sshpass, rsync
 """
+import contextlib
 from inspect import cleandoc
+import os
+import signal
 import sys
 import re
 import shlex
@@ -12,7 +15,7 @@ import dataclasses
 from pathlib import Path
 import socket
 
-from typing import List, Sequence, Tuple
+from typing import Any, Generator, List, Optional, Sequence, Tuple, cast
 import urllib.parse
 from monolaunch.yaml_utils import FieldAccessError, assert_JSON, PathWithJPointer, load_YAML, urlquote
 
@@ -136,7 +139,9 @@ class Machine:
             is_local = self.user == getpass.getuser()
         return is_local
 
-    def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True, tt: bool = False) -> Tuple[str, ...]:
+    def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True, cwd: Optional[Path] = None, tt: bool = False) -> Tuple[str, ...]:
+        if cwd is not None:
+            remote_cmd = ["bash", "-c", shlex.join(["cd", str(cwd)]) + "; exec " + shlex.join(remote_cmd)]
         if with_env_loader and self.env_loader:
             remote_cmd = (*self.env_loader, *remote_cmd)
         if self.is_local():
@@ -263,6 +268,156 @@ def sync(params_link: str):
         expanded_destination = remote_expandvars(machine, info.destination)
         print(f"rsync {expanded_source} -> {expanded_destination}")
         rsync(expanded_source, expanded_destination, machine, info.check_only)
+
+@contextlib.contextmanager
+def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
+    suf = "/" if source.exists() and source.is_dir() else ""
+
+    from uuid import uuid4
+    remote_tmp_dir = Path(f"/tmp/temp_rsync_{os.getpid()}_" + str(uuid4()).replace("-", "_"))
+    destination = remote_tmp_dir / source.name
+
+    print(f"create temp directory {remote_tmp_dir}")
+    cmd = machine.command(["mkdir", "-p", str(remote_tmp_dir)], with_env_loader=False)
+    subprocess.run(cmd, check=True)
+
+    try:
+        password_args = ["sshpass", "-p", machine.password] if machine.password else []
+        is_local = machine.address == "localhost" and machine.user == ""
+        destination_ = ((f"{machine.user}@" if machine.user else "") + f"{machine.address}:" if not is_local else "") + str(destination)
+        print(f"transfer {source} -> {destination_}")
+        subprocess.run([
+            *password_args,
+            "rsync", "-avz", "--checksum",
+            str(source) + suf, destination_ + suf,
+        ], check=True)
+
+        try:
+            yield destination
+
+        finally:
+            print(f"transfer {destination_} -> {source}")
+            subprocess.run([
+                *password_args,
+                "rsync", "-avz", "--checksum",
+                destination_ + suf, str(source) + suf,
+            ], check=True)
+
+    finally:
+        print(f"remove temp directory {remote_tmp_dir}")
+        cmd = machine.command(["rm", "-r", str(remote_tmp_dir)], with_env_loader=False)
+        subprocess.run(cmd, check=True)
+
+@contextlib.contextmanager
+def prun(name: str, command: Sequence[str], force_exit: bool = False, exit_timeout: float = 10, **kwargs: Any):
+    """
+    usage:
+    with prun("my task", ["cmd", "arg1", "arg2"], stdout=subprocess.PIPE) as p_task: # spawn a process
+        ... # do some works
+        p_task.wait() # wait until done
+    # it will try to interrupt the process (SIGINT)
+    # if force_exit is True, kill it after {exit_timeout} sec
+    """
+    process = None
+    try:
+        print(f"start {name}...")
+        kwargs = {
+            "stdin": subprocess.PIPE,
+            "stdout": None,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            **kwargs,
+        }
+        process = subprocess.Popen(command, **kwargs)
+        yield process
+    finally:
+        print(f"stop {name}...")
+        if process is not None and process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            
+            try:
+                process.wait(timeout=exit_timeout)
+            except subprocess.TimeoutExpired:
+                if not force_exit: raise
+                print(f"[with_roscore] fail to interrupt process {name} ({command}), will kill it")
+                process.kill()
+                process.wait()
+
+@dataclasses.dataclass(frozen=True)
+class TaskInfo:
+    directory: Path
+    local: List[str]
+    remote: List[str]
+    machine: Machine
+
+    @staticmethod
+    def load(task_link: PathWithJPointer) -> "TaskInfo":
+        task = assert_JSON(load_YAML(task_link))
+        if not isinstance(task, dict):
+            raise TypeError(f"{task_link} is not map")
+        
+        directory = task.get("directory")
+        if not isinstance(directory, str):
+            raise TypeError(f"{task_link}/directory is not str")
+        
+        local = task.get("local")
+        if not (isinstance(local, list) and all(isinstance(e, str) for e in local) and local):
+            raise TypeError(f"{task_link}/local is not str list")
+
+        remote = task.get("remote")
+        if not (isinstance(remote, list) and all(isinstance(e, str) for e in remote) and remote):
+            raise TypeError(f"{task_link}/remote is not str list")
+        
+        machine_str = task.get("machine")
+        if not isinstance(machine_str, str):
+            raise TypeError(f"{task_link}/machine is not str")
+        machine = Machine.parse(machine_str)
+        
+        return TaskInfo(directory=Path(directory), local=cast(List[str], local), remote=cast(List[str], remote), machine=machine)
+
+def run_remote_task(task_link: str):
+    """
+    run a remote task.
+
+    task_link is a link to a yaml file in the format:
+    ```
+    directory: "path/to/local/work/directory"
+    local: ["local_command.sh", "arg1", "arg2"]
+    remote: ["remote_command.sh", "arg1", "arg2"]
+    machine: machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2
+    ```
+    If machine is local, remote command is simply run on local machine (no rsync, no ssh).
+    Otherwise, the full remote flow below is used:
+    - Rsyncs directory into remote temp directory
+    - Starts local command in the background
+    - Runs remote command on the remote machine, inside the synced folder
+    - Interrupts local command as soon as remote command finishes
+    - rsyncs the folder back to overwrite local directory,
+      and removes the temp directory on the remote machine afterwards
+    """
+    task = TaskInfo.load(PathWithJPointer.parse(task_link))
+
+    directory = task.directory.resolve()
+    if directory.exists() or not directory.is_dir():
+        raise ValueError(f"{directory} is not a directory")
+
+    machine = task.machine.reduce_local()
+    if machine.is_local():
+        print("machine is local, execute task locally")
+        with prun("local", task.local, cwd=directory, force_exit=True, exit_timeout=10):
+            remote_command = machine.command(task.remote, cwd=directory)
+            with prun("remote", remote_command, force_exit=True, exit_timeout=10) as p_remote:
+                ret = p_remote.wait()
+        exit(ret)
+
+    else:
+        with temp_rsync(directory, machine) as remote_tmp_directory:
+            with prun("local", task.local, cwd=directory, force_exit=True, exit_timeout=10):
+                remote_command = machine.command(task.remote, cwd=remote_tmp_directory, tt=True)
+                with prun("remote", remote_command, force_exit=True, exit_timeout=10) as p_remote:
+                    ret = p_remote.wait()
+        exit(ret)
+
 
 __all__ = ["sync"]
 
