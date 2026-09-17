@@ -594,6 +594,15 @@ class EmptyMergeWarning(ResolveWarning):
     def __str__(self):
         return f"!merge list cannot be empty: at {_link_to_str(self.link)!s}"
 
+class DefaultTypeMismatchWarning(ResolveWarning):
+    def __init__(self, link: PathWithJPointer, default: JSON, expected_type: str):
+        self.link = link
+        self.default = default
+        self.expected_type = expected_type
+    
+    def __str__(self):
+        return f"schema default value at {self.link} ({self.default}) doesn't match its type {self.expected_type}"
+
 class SyncResourceWarning(Warning):
     pass
 
@@ -844,6 +853,9 @@ class SchemaSource:
         Literal["any", "struct", "dict", "array", "null", "scalar", "enum", "unknown"],
         Union[None, Dict[str, "SchemaSource"], "SchemaSource", type, List[Any]]
     ]:
+        assert self.get_inner() is None
+        assert self.get_ref() is None
+        
         if isinstance(self.data, dict) and not self.data:
             return "any", None
 
@@ -1150,23 +1162,6 @@ class SourcedNode:
                 warnings.warn(SchemaMismatchTypeWarning(self.link, type_, schema.link, schema_type))
 
     @raises(SchemaParseWarning)
-    def schema_default(self) -> Optional[JSON]:
-        for schema in self.schema:
-            metadata = schema.get_metadata()
-            if metadata.default is not None:
-                return metadata.default
-            type_, value = schema.access()
-            if type_ == "array":
-                return []
-            elif type_ == "struct":
-                assert isinstance(value, dict)
-                return {key: None for key in value.keys()}
-            elif type_ == "dict":
-                return {}
-            elif type_ == "null":
-                return None
-
-    @raises(SchemaParseWarning)
     def schema_type(self) -> Optional[Literal["any", "struct", "dict", "array", "null", "scalar", "enum", "unknown"]]:
         for schema in self.schema:
             return schema.access()[0]
@@ -1442,7 +1437,7 @@ class SourceLoader:
     @raises(LoadSourceWarning, SchemaRefLoopWarning, EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning)
     def get_(self, node: SourcedNode, fieldpath: Union[int, str, JPointer]) -> Tuple[SourcedNode, Set[Path]]:
         """
-        resolve given node until given path. returns the node of given path and its dependencies, or None for failure.
+        resolve given node until given path. returns the node of given path and its dependencies.
         """
         if isinstance(fieldpath, (int, str)):
             fieldpath = JPointer((str(fieldpath),))
@@ -1466,6 +1461,63 @@ class SourceLoader:
         resolve given node until given path. returns the node of given path, or None for failure.
         """
         return self.get_(node, fieldpath)[0]
+
+    @raises(LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning, SchemaParseWarning, DefaultTypeMismatchWarning)
+    def resolve_default_(self, schema: SchemaSource) -> Tuple[JSON, Set[Path]]:
+        """
+        resolve default value of given schema in depth.
+        returns the default value and its dependencies.
+        use None as default for bad schema.
+        """
+        depends: Set[Path] = set([schema.link.filepath])
+        type_, value = schema.access()
+        if type_ == "array":
+            return [], depends
+        elif type_ == "struct":
+            assert isinstance(value, dict)
+            default: JSON = {}
+            for key, subschema in value.items():
+                subschema, depends_ = self._resolve_schema_ref(subschema)
+                depends.update(depends_)
+                if subschema is None:
+                    subschema = SchemaSource(PathWithJPointer(), {})
+                value, depends_ = self.resolve_default_(subschema)
+                depends.update(depends_)
+                default[key] = value
+            return default, depends
+        elif type_ == "dict":
+            return {}, depends
+        elif type_ == "null":
+            return None, depends
+
+        default = None
+        metadata = schema.get_metadata()
+        if metadata.default is not None:
+            default = metadata.default
+
+        if type_ == "scalar":
+            assert value in (bool, int, float, str)
+            if not isinstance(default, value):
+                warnings.warn(DefaultTypeMismatchWarning(schema.link, default, value.__name__))
+                default = value()
+            return default, depends
+        elif type_ == "enum":
+            assert isinstance(value, list)
+            if default not in value:
+                warnings.warn(DefaultTypeMismatchWarning(schema.link, default, " | ".join(repr(e) for e in value)))
+                default = value[0] if value else None
+            return default, depends
+
+        assert type_ in ("any", "unknown")
+        return default, depends
+
+    @raises(LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning, SchemaParseWarning, DefaultTypeMismatchWarning)
+    def resolve_default(self, node: SourcedNode) -> JSON:
+        """
+        resolve default value of the first schema of given node, None if no schema or bad schema.
+        """
+        if not node.schema: return None
+        return self.resolve_default_(node.schema[0])[0]
 
     @raises(SchemaMismatchTypeWarning, SchemaMismatchStructWarning, LoadSourceWarning,
             EmptyMergeWarning, LoadSchemaWarning, SchemaRefLoopWarning, SchemaLinkAccessWarning, IncompatibleMergeWarning)

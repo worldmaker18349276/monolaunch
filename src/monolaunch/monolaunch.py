@@ -294,19 +294,19 @@ class Ctx:
                 return SCHEMATYPE_TO_CLASSNAME.get(schema_type, "any")
                 
             elif attr == "__len__":
-                default = tmp_param_node.schema_default()
+                default = self.param_loader.resolve_default(tmp_param_node)
                 if not isinstance(default, list):
                     raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
                 return len(default)
 
             elif attr == "__keys__":
-                default = tmp_param_node.schema_default()
+                default = self.param_loader.resolve_default(tmp_param_node)
                 if not isinstance(default, dict):
                     raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
                 return list(default.keys())
 
             else:
-                default = tmp_param_node.schema_default()
+                default = self.param_loader.resolve_default(tmp_param_node)
                 if default is None:
                     raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
                 return default
