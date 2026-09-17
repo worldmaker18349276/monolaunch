@@ -85,7 +85,7 @@ __all__ = [
     "JSONScalar", "JSON",
     "is_JSON", "assert_JSON",
     "deep_update", "deep_merge", "deep_copy", "deep_eq", "deep_diff", "deep_iter",
-    "FieldAccessError", "JPointer", "PathWithJPointer",
+    "FieldAccessError", "JPointer", "PathWithJPointer", "TypedPathWithJPointer",
     "SimpleYAMLLoader", "load_YAML", "SimpleYAMLDumper", "save_YAML",
     "TaggedScalar", "TaggedDict", "TaggedList", "TaggedJSON",
     "ExYAMLLoader", "load_ExYAML", "ExYAMLDumper", "save_ExYAML",
@@ -450,6 +450,11 @@ class PathWithJPointer:
         fieldpath = urllib.parse.unquote(fieldpath)
         return cls(Path(filepath), JPointer.parse(fieldpath))
 
+    def with_schema(self, schema: Union[str, Path, JSON]) -> "TypedPathWithJPointer":
+        if isinstance(schema, (str, Path)):
+            schema = cast(JSON, {"$ref": str(schema)})
+        return TypedPathWithJPointer(self.filepath, self.fieldpath, schema, len(self.fieldpath.elements))
+
     @classmethod
     def create(cls, link: Union[str, Path, "PathWithJPointer"]) -> "PathWithJPointer":
         if isinstance(link, str):
@@ -481,6 +486,32 @@ class PathWithJPointer:
 
     def __repr__(self) -> str:
         return f"PathWithJPointer.parse({str(self)!r})"
+
+@dataclass(frozen=True)
+class TypedPathWithJPointer(PathWithJPointer):
+    """
+    a json file path with json pointer, attached with a json schema.  
+    schema describes the type of node `fieldpath[:schema_root]`,
+    and all types along rest path must match.
+    """
+    schema: JSON = field(default_factory=lambda: {})
+    schema_root: int = 0
+
+    def __truediv__(self, key: Union[int, str, JPointer]) -> "TypedPathWithJPointer":
+        link = super() / key
+        return TypedPathWithJPointer(link.filepath, link.fieldpath, self.schema, self.schema_root)
+
+    def append(self, key: Union[int, str]) -> "TypedPathWithJPointer":
+        link = super().append(key)
+        return TypedPathWithJPointer(link.filepath, link.fieldpath, self.schema, self.schema_root)
+
+    def extend(self, subfieldpath: JPointer) -> "TypedPathWithJPointer":
+        link = super().extend(subfieldpath)
+        return TypedPathWithJPointer(link.filepath, link.fieldpath, self.schema, self.schema_root)
+
+    def resolve(self, base_path: Optional[Path] = None) -> "TypedPathWithJPointer":
+        link = super().resolve(base_path)
+        return TypedPathWithJPointer(link.filepath, link.fieldpath, self.schema, self.schema_root)
 
 
 class SimpleYAMLLoader(yaml.SafeLoader):

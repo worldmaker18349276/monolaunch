@@ -28,16 +28,16 @@ import os
 import shlex
 from uuid import uuid4
 import yaml
-from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, PathWithJPointer
+from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, PathWithJPointer, TypedPathWithJPointer
 from . import monoparam
-from .monoparam import LinkAccessTypeWarning, SchemaJSON, SchemaSource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import LinkAccessTypeWarning, SchemaSource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
     "run",
     "group", "node", "include", "master",
-    "set_param", "load_param", "get_value", "with_schema",
-    "TypedPathWithJPointer",
+    "set_param", "load_param", "get_value",
+    "PathWithJPointer", "TypedPathWithJPointer",
     "load_logger", "set_logger",
     "remap", "set_env",
     "machine",
@@ -73,31 +73,6 @@ def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JPointer, JSONScala
             pass
         else:
             yield path, value
-
-
-@dataclass(frozen=True)
-class TypedPathWithJPointer:
-    """
-    schema describes the type of root node of link.filepath,
-    and all types along link.fieldpath must match.
-    """
-    link: PathWithJPointer
-    schema: SchemaSource = field(default_factory=lambda: SchemaSource(PathWithJPointer(), {}))
-
-    def __truediv__(self, key: Union[int, str, JPointer]) -> "TypedPathWithJPointer":
-        return TypedPathWithJPointer(self.link / key, self.schema)
-
-    def append(self, key: Union[int, str]) -> "TypedPathWithJPointer":
-        return TypedPathWithJPointer(self.link.append(key), self.schema)
-
-    def extend(self, subfieldpath: JPointer) -> "TypedPathWithJPointer":
-        return TypedPathWithJPointer(self.link.extend(subfieldpath), self.schema)
-
-    def resolve(self, base_path: Optional[Path] = None) -> "TypedPathWithJPointer":
-        return TypedPathWithJPointer(self.link.resolve(base_path), self.schema)
-
-    def __str__(self) -> str:
-        return str(self.link)
 
 
 # -- build context ------------------------------------------------------------
@@ -244,7 +219,7 @@ class Ctx:
                 elif isinstance(value, PathWithJPointer):
                     is_absolute = value.filepath.is_absolute()
                 elif isinstance(value, TypedPathWithJPointer):
-                    is_absolute = value.link.filepath.is_absolute()
+                    is_absolute = value.filepath.is_absolute()
                 else:
                     is_absolute = False
                 if not is_absolute:
@@ -255,26 +230,29 @@ class Ctx:
         assert self.param_node is not None
         if is_load:
             for path, value in JSONLike_deep_iter(cast(JSONWithOnlyLink, param)):
-                if isinstance(value, TypedPathWithJPointer):
-                    value = value.link
+                # TODO: do schema type check
                 self.param_loader.include(self.param_node, path, value, str(machine))
         else:
             for path, value in JSONLike_deep_iter(cast(JSONWithPath, param)):
                 self.param_loader.update(self.param_node, path, value, str(machine))
 
+    # TODO: resolve !resource -> Path
     def get_value(self, link: TypedPathWithJPointer) -> JSON:
-        if not link.link.filepath.is_absolute():
-            raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link.link.filepath}, you may want to use dirname()")
-        tmp_param_node, _depends = self.param_loader.load(PathWithJPointer(link.link.filepath))
+        if not link.filepath.is_absolute():
+            raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link.filepath}, you may want to use dirname()")
+        tmp_param_node, _depends = self.param_loader.load(PathWithJPointer(link.filepath))
         if not tmp_param_node.is_accessible:
-            raise FieldAccessError(JPointer(), str(link.link.filepath))
-        if link.schema.data != {}:
-            tmp_param_node.schema.insert(0, link.schema)
+            raise FieldAccessError(JPointer(), str(link.filepath))
+        tmp_param_node = self.param_loader.get(tmp_param_node, link.fieldpath[:link.schema_root])
+        if not tmp_param_node.is_accessible:
+            raise FieldAccessError(link.fieldpath[:link.schema_root], str(link.filepath))
+        if link.schema != {}:
+            tmp_param_node.schema.insert(0, SchemaSource(PathWithJPointer(), [link.schema]))
 
         # special attr
         attr = None
-        fieldpath = link.link.fieldpath
-        if len(fieldpath.elements) > 0 and  fieldpath.elements[-1] in ("__class__", "__len__", "__keys__"):
+        fieldpath = link.fieldpath[link.schema_root:]
+        if len(fieldpath.elements) > 0 and fieldpath.elements[-1] in ("__class__", "__len__", "__keys__"):
             attr = fieldpath.elements[-1]
             fieldpath = fieldpath[:-1]
 
@@ -284,7 +262,7 @@ class Ctx:
             if attr == "__class__":
                 schema_type = tmp_param_node.schema_type()
                 if schema_type is None:
-                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                    raise FieldAccessError(link.fieldpath, str(link.filepath))
                 SCHEMATYPE_TO_CLASSNAME = {
                     "struct": "dict",
                     "dict": "dict",
@@ -296,19 +274,19 @@ class Ctx:
             elif attr == "__len__":
                 default = self.param_loader.resolve_default(tmp_param_node)
                 if not isinstance(default, list):
-                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                    raise FieldAccessError(link.fieldpath, str(link.filepath))
                 return len(default)
 
             elif attr == "__keys__":
                 default = self.param_loader.resolve_default(tmp_param_node)
                 if not isinstance(default, dict):
-                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                    raise FieldAccessError(link.fieldpath, str(link.filepath))
                 return list(default.keys())
 
             else:
                 default = self.param_loader.resolve_default(tmp_param_node)
                 if default is None:
-                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                    raise FieldAccessError(link.fieldpath, str(link.filepath))
                 return default
 
         else:
@@ -328,14 +306,14 @@ class Ctx:
             elif attr == "__len__":
                 type_, value = tmp_param_node.access()
                 if type_ != "seq":
-                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                    raise FieldAccessError(link.fieldpath, str(link.filepath))
                 assert isinstance(value, range)
                 return len(value)
 
             elif attr == "__keys__":
                 type_, value = tmp_param_node.access()
                 if type_ != "map":
-                    raise FieldAccessError(link.link.fieldpath, str(link.link.filepath))
+                    raise FieldAccessError(link.fieldpath, str(link.filepath))
                 assert isinstance(value, list)
                 return cast(JSON, value)
 
@@ -408,7 +386,7 @@ class Ctx:
     def load_logger(self, link: TypedPathWithJPointer):
         if not self.scopes:
             raise NoTopLevelScopeError()
-        self.scopes[-1].logger.append(link.link)
+        self.scopes[-1].logger.append(link)
 
     def set_logger(self, config: LoggerConfig):
         if not self.scopes:
@@ -691,11 +669,6 @@ def anon(name: str) -> str:
     return name + "_" + str(uuid4()).replace("-", "_")
 
 
-def with_schema(path: Path, schema: Union[str, Path, SchemaJSON]) -> TypedPathWithJPointer:
-    if isinstance(schema, (str, Path)):
-        schema = cast(SchemaJSON, {"$ref": str(schema)})
-    return TypedPathWithJPointer(PathWithJPointer(path), SchemaSource(PathWithJPointer(), schema))
-
 JsonValueT = TypeVar("JsonValueT", Type[None], bool, int, float, str, List[JSON], Dict[str, JSON])
 
 @overload
@@ -707,17 +680,17 @@ def get_value(link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer], e
     if isinstance(link, TypedPathWithJPointer):
         pass
     elif isinstance(link, PathWithJPointer):
-        link = TypedPathWithJPointer(link)
+        link = link.with_schema({})
     elif isinstance(link, Path):
-        link = TypedPathWithJPointer(PathWithJPointer(link))
+        link = TypedPathWithJPointer(link)
     elif isinstance(link, str): # pyright: ignore[reportUnnecessaryIsInstance]
-        link = TypedPathWithJPointer(PathWithJPointer.parse(link))
+        link = PathWithJPointer.parse(link).with_schema({})
     else:
         raise TypeError(type(link))
 
     res = ctx().get_value(link)
     if expected_type is not None and type(res) != expected_type:
-        raise LinkAccessTypeWarning(link.link, type(res), expected_type)
+        raise LinkAccessTypeWarning(link, type(res), expected_type)
     return res
 
 def set_param(json: JSONWithPath):      ctx().set_param(json)
@@ -887,13 +860,13 @@ def load_logger(config_link: Union[str, Path, PathWithJPointer, TypedPathWithJPo
     about config format, see `set_logger`.
     """
     if isinstance(config_link, str):
-        config_link = TypedPathWithJPointer(PathWithJPointer.parse(config_link))
+        config_link = PathWithJPointer.parse(config_link).with_schema({})
     elif isinstance(config_link, Path):
-        config_link = TypedPathWithJPointer(PathWithJPointer(config_link))
-    elif isinstance(config_link, PathWithJPointer):
         config_link = TypedPathWithJPointer(config_link)
-    elif isinstance(config_link, TypedPathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
+    elif isinstance(config_link, TypedPathWithJPointer):
         pass
+    elif isinstance(config_link, PathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
+        config_link = config_link.with_schema({})
     else:
         raise TypeError(type(config_link))
 
