@@ -1001,9 +1001,6 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
                 default="__import__('monolaunch.monoparam').monoparam.to_resolved(source_param_pointer)",
             )))
             launch_el.append(ET.Element("arg", dict(name="resolved_param", default="$(eval eval(resolved_param_expr))")))
-            param_el = ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)", param="/"))
-            param_el.text = yaml.dump(param, Dumper=SourcedYAMLDumper, sort_keys=False)
-            launch_el.append(param_el)
 
         # dry_run == 2
         dry_run_2 = ET.Element("group", {"if": "$(eval dry_run == 2)"})
@@ -1035,6 +1032,12 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
             else: # Include
                 assert node.machine is not None
                 launch_el.append(node.to_xml(machine_xml=node.machine.to_xml(default=True)))
+
+        # load param in the end, so that it override other rosparam set/load in <include>
+        if param_node:
+            param_el = ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)", param="/"))
+            param_el.text = yaml.dump(param, Dumper=SourcedYAMLDumper, sort_keys=False)
+            launch_el.append(param_el)
 
         _indent(launch_el)
         launch_str = ET.tostring(launch_el, encoding="unicode", xml_declaration=True)
