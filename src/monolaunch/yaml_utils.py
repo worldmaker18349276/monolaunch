@@ -498,7 +498,7 @@ class TypedPathWithJPointer(PathWithJPointer):
     schema_root: int = 0
 
     def __truediv__(self, key: Union[int, str, JPointer]) -> "TypedPathWithJPointer":
-        link = super() / key
+        link = super().__truediv__(key)
         return TypedPathWithJPointer(link.filepath, link.fieldpath, self.schema, self.schema_root)
 
     def append(self, key: Union[int, str]) -> "TypedPathWithJPointer":

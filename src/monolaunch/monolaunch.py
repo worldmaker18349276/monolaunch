@@ -247,7 +247,7 @@ class Ctx:
         if not tmp_param_node.is_accessible:
             raise FieldAccessError(link.fieldpath[:link.schema_root], str(link.filepath))
         if link.schema != {}:
-            tmp_param_node.schema.insert(0, SchemaSource(PathWithJPointer(), [link.schema]))
+            tmp_param_node.schema.insert(0, SchemaSource(PathWithJPointer(), link.schema))
 
         # special attr
         attr = None
