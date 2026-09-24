@@ -497,6 +497,15 @@ class TypedPathWithJPointer(PathWithJPointer):
     schema: JSON = field(default_factory=lambda: {})
     schema_root: int = 0
 
+    @classmethod
+    def create(cls, link: Union[str, Path, "PathWithJPointer", "TypedPathWithJPointer"]) -> "TypedPathWithJPointer":
+        if isinstance(link, str):
+            link = cls.parse(link)
+        elif isinstance(link, Path):
+            link = cls(link)
+        link = cls(link.filepath, link.fieldpath)
+        return link
+
     def __truediv__(self, key: Union[int, str, JPointer]) -> "TypedPathWithJPointer":
         link = super().__truediv__(key)
         return TypedPathWithJPointer(link.filepath, link.fieldpath, self.schema, self.schema_root)

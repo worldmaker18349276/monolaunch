@@ -30,7 +30,7 @@ from uuid import uuid4
 import yaml
 from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, PathWithJPointer, TypedPathWithJPointer
 from . import monoparam
-from .monoparam import LinkAccessTypeWarning, SchemaSource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import FieldAccessWarning, Resource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
@@ -84,31 +84,69 @@ def _join_ns(path: Tuple[str, ...]) -> str:
     return "/" + "/".join(path)
 
 class DuplicatedNameError(Exception):
-    pass
+    def __init__(self, type: str, name: str):
+        self.type = type
+        self.name = name
+    
+    def __str__(self):
+        return f"{self.type} name {self.name!r} is already used"
 
 class NeverUseError(Exception):
-    pass
+    def __init__(self, statement: str):
+        self.statement = statement
+    
+    def __str__(self):
+        return f"{self.statement} object is created but not used"
 
 class MultipleUseError(Exception):
-    pass
+    def __init__(self, statement: str):
+        self.statement = statement
+    
+    def __str__(self):
+        return f"{self.statement} object cannot be reused"
 
 class UseInPrivateScopeError(Exception):
-    pass
+    def __init__(self, statement: str):
+        self.statement = statement
+    
+    def __str__(self):
+        return f"{self.statement} cannot be used inside node or include"
 
 class FilePathNotAbsoluteError(Exception):
-    pass
+    def __init__(self, path: Path):
+        self.path = path
+    
+    def __str__(self):
+        return f"param file path must be absolute path, got: {self.path}, you may want to use dirname()"
 
 class LoopRemapError(Exception):
-    pass
+    def __init__(self, name: str):
+        self.name = name
+    
+    def __str__(self):
+        return f"remap {self.name} causes loop"
 
-class LocalMachineNotLocalError(Warning):
-    pass
+class LocalMachineNotLocalError(Exception):
+    def __init__(self, machine: str):
+        self.machine = machine
+    
+    def __str__(self):
+        return f"machine with name 'local' must be local machine, got: {self.machine}"
 
-class NoTopLevelScopeError(Warning):
+class NoTopLevelScopeError(Exception):
     def __str__(self):
         return "please put `with machine(..., name='local')` at the top scope"
 
 LoggerConfig = Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATAL"]]
+
+def resolve_logger_config(logger_config: JSON) -> LoggerConfig:
+    if not isinstance(logger_config, dict):
+        raise TypeError(f"expect dict, got {type(logger_config).__name__}")
+    for level in logger_config.values():
+        if level not in ("DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
+            raise TypeError(f"expect 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL', got {level}")
+    return cast(LoggerConfig, logger_config)
+
 
 @dataclass
 class Scope:
@@ -155,7 +193,7 @@ class Ctx:
     def add_node(self, ns: Tuple[str, ...], node: "Node"):
         full_name = _join_ns((*ns, node.name))
         if full_name in self.nodes:
-            raise DuplicatedNameError(f"node name {full_name!r} is already used")
+            raise DuplicatedNameError("node", full_name)
         assert not any(node is node_ for node_ in self.nodes.values())
         self.nodes[full_name] = node
 
@@ -167,9 +205,9 @@ class Ctx:
         if machine.name in self.machines and self.machines[machine.name] == machine:
             return
         if machine.name in self.machines and not self.find_machine(machine.machine):
-            raise DuplicatedNameError(f"machine name {machine.name!r} is already used")
+            raise DuplicatedNameError("machine", machine.name)
         if machine.name == "local" and not machine.machine.is_local():
-            raise LocalMachineNotLocalError(f"machine with name 'local' must be local machine, got: {machine.machine}")
+            raise LocalMachineNotLocalError(str(machine.machine))
         self.machines[machine.name] = machine
     
     def find_machine(self, machine: Machine) -> Optional["MachineCtx"]:
@@ -197,13 +235,13 @@ class Ctx:
         return bool(self.scopes) and self.scopes[-1].is_private
 
     # param
-    def set_param(self, param: JSONWithPath):
-        self._set_param(param, self.default_machine, False)
+    def set_param(self, param: JSONWithPath, check: bool = True):
+        self._set_param(False, param, self.default_machine, check)
 
-    def load_param(self, param: JSONWithOnlyLink):
-        self._set_param(param, self.default_machine, True)
+    def load_param(self, param: JSONWithOnlyLink, check: bool = True):
+        self._set_param(True, param, self.default_machine, check)
 
-    def _set_param(self, param: Union[JSONWithPath, JSONWithOnlyLink], machine: "MachineCtx", is_load: bool):
+    def _set_param(self, is_load: bool, param: Union[JSONWithPath, JSONWithOnlyLink], machine: "MachineCtx", check: bool):
         if not isinstance(param, dict):
             raise TypeError("param should be a dictionary")
 
@@ -212,114 +250,82 @@ class Ctx:
             for key, value in param.items()
         })
 
-        if is_load:
-            for _path, value in JSONLike_deep_iter(param):
-                if isinstance(value, (str, Path)):
-                    is_absolute = Path(value).is_absolute()
-                elif isinstance(value, PathWithJPointer):
-                    is_absolute = value.filepath.is_absolute()
-                elif isinstance(value, TypedPathWithJPointer):
-                    is_absolute = value.filepath.is_absolute()
-                else:
-                    is_absolute = False
-                if not is_absolute:
-                    raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {value}, you may want to use dirname()")
-
         if self.param_node is None:
             self.param_node = self.param_loader.new(self.params_filepath)
         assert self.param_node is not None
         if is_load:
             for path, value in JSONLike_deep_iter(cast(JSONWithOnlyLink, param)):
-                # TODO: do schema type check
+                if isinstance(value, (str, Path)):
+                    inc_path = Path(value)
+                elif isinstance(value, TypedPathWithJPointer):
+                    inc_path = value.filepath
+                elif isinstance(value, PathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
+                    inc_path = value.filepath
+                else:
+                    raise TypeError(f"load_param dictionary should contain yaml file path to include, but got {value}")
+                if not inc_path.is_absolute():
+                    raise FilePathNotAbsoluteError(inc_path)
+
+                if check:
+                    # get_value for type checking
+                    self.get_value(TypedPathWithJPointer.create(value), allow_attrs=False)
                 self.param_loader.include(self.param_node, path, value, str(machine))
         else:
             for path, value in JSONLike_deep_iter(cast(JSONWithPath, param)):
                 self.param_loader.update(self.param_node, path, value, str(machine))
 
     # TODO: resolve !resource -> Path
-    def get_value(self, link: TypedPathWithJPointer) -> JSON:
+    def get_value(self, link: TypedPathWithJPointer, allow_attrs: bool = True) -> JSON:
         if not link.filepath.is_absolute():
-            raise FilePathNotAbsoluteError(f"param file path must be absolute path, got: {link.filepath}, you may want to use dirname()")
-        tmp_param_node, _depends = self.param_loader.load(PathWithJPointer(link.filepath))
-        if not tmp_param_node.is_accessible:
-            raise FieldAccessError(JPointer(), str(link.filepath))
-        tmp_param_node = self.param_loader.get(tmp_param_node, link.fieldpath[:link.schema_root])
-        if not tmp_param_node.is_accessible:
-            raise FieldAccessError(link.fieldpath[:link.schema_root], str(link.filepath))
+            raise FilePathNotAbsoluteError(link.filepath)
+        tmp_param_node = self.param_loader.load(link.filepath)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FieldAccessWarning)
+            tmp_param_node = self.param_loader.walk(tmp_param_node, link.fieldpath[:link.schema_root])
+            assert tmp_param_node is not None
         if link.schema != {}:
-            tmp_param_node.schema.insert(0, SchemaSource(PathWithJPointer(), link.schema))
+            tmp_param_node = self.param_loader.with_new_schema(tmp_param_node, None, link.schema)
 
         # special attr
-        attr = None
+        attr = "__self__"
         fieldpath = link.fieldpath[link.schema_root:]
-        if len(fieldpath.elements) > 0 and fieldpath.elements[-1] in ("__class__", "__len__", "__keys__"):
+        if allow_attrs and len(fieldpath.elements) > 0 and fieldpath.elements[-1] in ("__class__", "__len__", "__keys__", "__self__"):
             attr = fieldpath.elements[-1]
             fieldpath = fieldpath[:-1]
 
-        tmp_param_node = self.param_loader.get(tmp_param_node, fieldpath)
-        is_absence = not tmp_param_node.is_accessible or tmp_param_node.access()[0] == "null"
-        if is_absence:
-            if attr == "__class__":
-                schema_type = tmp_param_node.schema_type()
-                if schema_type is None:
-                    raise FieldAccessError(link.fieldpath, str(link.filepath))
-                SCHEMATYPE_TO_CLASSNAME = {
-                    "struct": "dict",
-                    "dict": "dict",
-                    "array": "list",
-                    "null": "NoneType",
-                }
-                return SCHEMATYPE_TO_CLASSNAME.get(schema_type, "any")
-                
-            elif attr == "__len__":
-                default = self.param_loader.resolve_default(tmp_param_node)
-                if not isinstance(default, list):
-                    raise FieldAccessError(link.fieldpath, str(link.filepath))
-                return len(default)
-
-            elif attr == "__keys__":
-                default = self.param_loader.resolve_default(tmp_param_node)
-                if not isinstance(default, dict):
-                    raise FieldAccessError(link.fieldpath, str(link.filepath))
-                return list(default.keys())
-
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FieldAccessWarning)
+            tmp_param_node = self.param_loader.walk(tmp_param_node, fieldpath)
+            assert tmp_param_node is not None
+            tmp_param_node = self.param_loader.resolve_indirect_(tmp_param_node)[0]
+        type_keys = tmp_param_node.access()
+        if attr == "__class__":
+            if type_keys[0] == "null":
+                return type(None).__name__
+            elif type_keys[0] == "seq":
+                return list.__name__
+            elif type_keys[0] == "map":
+                return dict.__name__
+            elif type_keys[0] == "scalar":
+                return type(type_keys[1]).__name__ if not isinstance(type_keys[1], Resource) else str.__name__
             else:
-                default = self.param_loader.resolve_default(tmp_param_node)
-                if default is None:
-                    raise FieldAccessError(link.fieldpath, str(link.filepath))
-                return default
+                assert False
+
+        elif attr == "__len__":
+            if type_keys[0] != "seq":
+                raise FieldAccessError(link.fieldpath, str(link.filepath))
+            assert isinstance(type_keys[1], range)
+            return len(type_keys[1])
+
+        elif attr == "__keys__":
+            if type_keys[0] != "map":
+                raise FieldAccessError(link.fieldpath, str(link.filepath))
+            assert isinstance(type_keys[1], list)
+            return cast(JSON, type_keys[1])
 
         else:
-            if attr == "__class__":
-                type_, value = tmp_param_node.access()
-                if type_ == "null":
-                    return "NoneType"
-                elif type_ == "seq":
-                    return "list"
-                elif type_ == "map":
-                    return "dict"
-                elif type_ == "scalar":
-                    return type(value).__name__
-                else:
-                    assert False
-
-            elif attr == "__len__":
-                type_, value = tmp_param_node.access()
-                if type_ != "seq":
-                    raise FieldAccessError(link.fieldpath, str(link.filepath))
-                assert isinstance(value, range)
-                return len(value)
-
-            elif attr == "__keys__":
-                type_, value = tmp_param_node.access()
-                if type_ != "map":
-                    raise FieldAccessError(link.fieldpath, str(link.filepath))
-                assert isinstance(value, list)
-                return cast(JSON, value)
-
-            else:
-                res, _depends = self.param_loader.resolve_all(tmp_param_node)
-                return res
+            res = self.param_loader.resolve_all(tmp_param_node)
+            return res
 
     # remap
     def _get_mapping(self) -> Tuple[KeysView[str], Callable[[str], Optional[str]]]:
@@ -347,7 +353,7 @@ class Ctx:
         for k in keys:
             v = value_func(k)
             if v is None:
-                raise LoopRemapError(f"remap {k} causes loop")
+                raise LoopRemapError(k)
             remap[k] = v
         return remap
 
@@ -368,7 +374,7 @@ class Ctx:
         for k in remap.keys():
             v = value_func(k)
             if v is None:
-                raise LoopRemapError(f"remap {k} causes loop")
+                raise LoopRemapError(k)
 
     # env
     def push_env(self, envvars: Dict[str, str]):
@@ -383,9 +389,12 @@ class Ctx:
         return merged
 
     # logger
-    def load_logger(self, link: TypedPathWithJPointer):
+    def load_logger(self, link: TypedPathWithJPointer, check: bool = True):
         if not self.scopes:
             raise NoTopLevelScopeError()
+        if check:
+            # get_value for type checking
+            resolve_logger_config(self.get_value(link, allow_attrs=False))
         self.scopes[-1].logger.append(link)
 
     def set_logger(self, config: LoggerConfig):
@@ -401,7 +410,7 @@ class Ctx:
         
         for config in configs:
             if isinstance(config, PathWithJPointer):
-                self.load_param({"~$ros_logger_config": config})
+                self.load_param({"~$ros_logger_config": config}, check=False)
             else:
                 self.set_param({"~$ros_logger_config": cast(JSONWithPath, config)})
 
@@ -411,7 +420,7 @@ def set_strict():
     """
     raise errors for failures of parameter loading/resolving/typechecking instead of warnings.
     """
-    warnings.filterwarnings("error", category=monoparam.LoadWarning)
+    warnings.filterwarnings("error", category=monoparam.FormatWarning)
     warnings.filterwarnings("error", category=monoparam.ResolveWarning)
     warnings.filterwarnings("error", category=monoparam.SchemaWarning)
 
@@ -431,14 +440,14 @@ class Include:
 
     def __del__(self):
         if not self._used:
-            raise NeverUseError(f"include object is created but not used: {self.file}")
+            raise NeverUseError("include")
 
     def __enter__(self):
         if self._used:
-            raise MultipleUseError(f"include object cannot be reused: {self.file}")
+            raise MultipleUseError("include")
         self._used = True
         if ctx().is_private:
-            raise UseInPrivateScopeError(f"inlcude cannot be used inside node or include: {self.file}")
+            raise UseInPrivateScopeError("inlcude")
 
         self.ns = ctx().ns
         ctx().add_include(self)
@@ -496,14 +505,14 @@ class Node:
 
     def __del__(self):
         if not self._used:
-            raise NeverUseError(f"node object is created but not used: {self.name}")
+            raise NeverUseError("node")
 
     def __enter__(self):
         if self._used:
-            raise MultipleUseError(f"node object cannot be reused: {self.name}")
+            raise MultipleUseError("node")
         self._used = True
         if ctx().is_private:
-            raise UseInPrivateScopeError(f"node cannot be used inside node or include: {self.name}")
+            raise UseInPrivateScopeError("node")
 
         self.ns = ctx().ns
         ctx().add_node(ctx().ns, self)
@@ -554,10 +563,10 @@ class Master:
 
     def __enter__(self):
         if ctx().master is not None:
-            raise MultipleUseError(f"master cannot be re-declared")
+            raise MultipleUseError("master")
 
         if ctx().is_private:
-            raise UseInPrivateScopeError(f"master cannot be used inside node or include")
+            raise UseInPrivateScopeError("master")
 
         ctx().master = self
         self.machine = ctx().default_machine
@@ -575,22 +584,6 @@ class Master:
             attrs["machine"] = self.machine.name
         el = ET.Element("master", attrs)
         return el
-
-def urlquote(s: str, unsafe: str = r"%#@/:;?") -> str:
-    return re.sub(
-        f"[{re.escape(unsafe)}]",
-        lambda m: ''.join(f"%{b:02X}" for b in m.group(0).encode("utf-8")),
-        s,
-    )
-
-class SchemeParseError(Exception):
-    def __init__(self, scheme: str, url: str, format: str = ""):
-        self.scheme = scheme
-        self.url = url
-        self.format = format
-    
-    def __str__(self):
-        return f"invalid {self.scheme} scheme url: {self.url}" + (f"\nformat: {self.format}" if self.format else "")
 
 class _Regenerate(BaseException):
     def __init__(self, machine: Machine):
@@ -690,7 +683,10 @@ def get_value(link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer], e
 
     res = ctx().get_value(link)
     if expected_type is not None and type(res) != expected_type:
-        raise LinkAccessTypeWarning(link, type(res), expected_type)
+        raise TypeError(
+            f"field {link} ({type(res).__name__})"
+            f" doesn't match expected type {expected_type.__name__}"
+        )
     return res
 
 def set_param(json: JSONWithPath):      ctx().set_param(json)
@@ -820,7 +816,7 @@ def node(*, name: str = "", pkg: str = "", type: Union[str, Path],
     if not pkg:
         # treat type as direct path to script
         if not Path(type).is_absolute():
-            raise FilePathNotAbsoluteError(f"since pkg is empty, type should be absolute path: {type}, you may want to use dirname()")
+            raise FilePathNotAbsoluteError(Path(type))
         args = (type, *args)
         pkg = "monolaunch"
         type = "exec.sh"
@@ -831,7 +827,7 @@ def node(*, name: str = "", pkg: str = "", type: Union[str, Path],
 
 def include(file: Union[str, Path], *, clear_params: bool = False, **args: Any) -> Include:
     if not Path(file).is_absolute():
-        raise FilePathNotAbsoluteError(f"include path should be absolute path: {file}, you may want to use dirname()")
+        raise FilePathNotAbsoluteError(Path(file))
 
     return Include(file=str(file), clear_params=clear_params, args=args)
 
@@ -844,14 +840,6 @@ def as_bool(s: Union[str, bool]) -> bool:
     else:
         raise ValueError(f"{s} is not valid bool literal")
 
-
-def resolve_logger_config(logger_config: JSON) -> LoggerConfig:
-    if not isinstance(logger_config, dict):
-        raise TypeError(f"expect dict, got {type(logger_config).__name__}")
-    for level in logger_config.values():
-        if level not in ("DEBUG", "INFO", "WARN", "ERROR", "FATAL"):
-            raise TypeError(f"expect 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL', got {level}")
-    return cast(LoggerConfig, logger_config)
 
 def load_logger(config_link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer]) -> None:
     """
