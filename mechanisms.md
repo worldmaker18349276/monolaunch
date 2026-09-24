@@ -228,6 +228,11 @@ this will load `file/path/to/subconfig.yaml`, take field `/sub/field`, and put i
 we actually do not set/load param via rosparam command,
 but aggregate them into a single param file using !include and !merge,
 them resolve it before launch.
+however, we don't collect set/load param inside included launch files.
+we load aggreated param at the end of generated launch file,
+so that you can overwrite parameters outside included launch files.
+that means set/load param only preserve order up to include.
+it's recommended to convert all your launch files into monolaunch scripts.
 
 source yaml files, resolved yaml file and ros parameter server can be synchronized dynamically.
 to use this function, user need to launch param_loader on launcher machine:
@@ -249,7 +254,14 @@ set_param({ "sub/field": subfield + 1 })
 ```
 where `int` ensures the type of `subfield`.
 with `get_value`, control flow of launching can be changed from user configuration.
+retrieving the value of the !resource field will give you the string of the original resource uri,
+but the local file resource uri will be rewritten on the parameter server,
+so that remote nodes can access the resources synchronized by monolaunch.
+see below for detail.
 
+accessing the value along two pointers and one combined pointer should be the same.
+for example, `get_value("camera_config.yaml#/camera_info")["intrinsic"]["fx"]`
+should equal to `get_value("camera_config.yaml#/camera_info/intrinsic/fx")`.
 note that getting value from the root will resolve all contents in depth
 ```python
 userconfig = get_value("file/path/to/userconfig.yaml", dict)
@@ -284,79 +296,8 @@ note that due to presence of type information,
 correct default value will be contructed if the field is absence or null.
 moreover, scalar default value described by schema will be used.
 you should define default values in the json schema, instead of writing the magic number directly in the code.
-
-yaml files can be annotated directly with schema.
-simply add `$schema: path/to/your.schema.json` to the root level in the yaml file,
-and lsp and monoparam will recognize it.
-parameter resolver will recognized schema and try to check the type during resolving.
-warnings will be raised if it doesn't match.
-
-we only support a specific form of json schema:
-```
-<schema>  = {                             // struct
-              "type": "object",
-              "properties": {
-                (<string>: <schema>,)*
-              }
-            }
-          | {                             // dict
-              "type": "object",
-              "additionalProperties": <schema>
-            }
-          | {                             // array
-              "type": "array",
-              "items": <schema>
-            }
-          | { "type": "null" }            // null
-          | {                             // scalar
-              "type": "boolean" | "integer" | "number" | "string"
-            }
-          | { "enum": [ (<json>,)* ] }    // enumerated values
-          | { "const": <json> }           // constant values
-          | { "anyOf": [ <schema> ] }     // wrap
-          | { "$ref": <path> }            // ref
-          | {}                            // any
-```
-each `<schema>` can have additional properties for metadata:
-```
-<metadata>  = {
-                ("description": <string>,)?
-                ("oneOf": [ ({ "const": <json> },)* ],)?
-                ("default": <json>,)?
-                ("minimum": <number>,)?
-                ("maximum": <number>,)?
-              }
-```
-struct and dict are for map, but struct must have fixed numbers of keys,
-and you cannot mix struct and dict;
-only one case is allowed in anyOf, it is just for wrapping up a schema so that additional metadata can be attached.
-
-this schema format is designed for mapping between json and static typed structure,
-especially for my another library `structmapper`, which supports structure (de)serializing in c++ and python.
-`structmapper` can export types as json schema, which can then be used here.
-`get_value` with json schema should behave just like `structmapper`.
-it is not my style to define config schema separately like dynamic_reconfigure.
-configuration and usage are closely related and should be defined directly in the code.
-
-json schema allows the advantages of type checking to be realized in data format and resolver.
-monolaunch doesn't use static type checking because it is hard to integrate typing between multiple languages.
-on the other hand, with json schema, external types can be included (dynamically) in any language.
-
-another reason is:
-I want to nerf the use of deserialization, otherwise the utility of `load_param` will be greatly reduced.
-it is clearly that parsing full configuration directly is easier
-```python
-my_config = MyConfig.from_json(my_config_link) # read data and statically type checked 
-set_param({
-    "config": my_config.node_config, # this become easier and statically type checked
-})
-load_param({
-    "config": my_config_link / "node_config", # this is relatively harder and dynamically type checked
-})
-```
-however, `load_param` is the better for the future use:
-don't resolve config in the generation phase, include it, so that you can change it before launch phase.
-the ease of full deserializing becomes a trap here.
+that means schema is not just an annotation, but will affect the behavior of `get_value`.
+see below for detail.
 
 
 ## Logger
@@ -603,13 +544,13 @@ to manage resources, we invent `!resource` tag, so that following url can be rec
 `!include` should be followed by the path of yaml file to be included.
 for example,
 
-base.yaml:
 ```yaml
+# file: base.yaml
 a: 1
 b: 2
 ```
-config.yaml:
 ```yaml
+# file: config.yaml
 base: !include base.yaml
 ```
 resolve to:
@@ -850,26 +791,26 @@ it can be followed by a string in the form:
 - package://{pkg_name}/{path_to_resource}
 - ros_home://{path_to_resource}
 
-file URI is the file path relative to current location (directory of the file contains this term);
-package URI refers to the workspace overlay where this item being read;
-ros_home URI refers to the ros home of current runtime when this item being used.
+file uri is the file path relative to current location (directory of the file contains this term);
+package uri refers to the workspace overlay where this item being read;
+ros_home uri refers to the ros home of current runtime when this item being used.
 
-resource URI should be transformed properly after switching carrier, otherwise the meanings may change.
-file URI should not be shared across machine since it is local resource;
-package URI can be shared across machine as long as they have the same overlay;
-ros_home URI is a runtime resource and should be prepared before each run on given machine.
+resource uri should be transformed properly after switching carrier, otherwise the meanings may change.
+file uri should not be shared across machine since it is local resource;
+package uri can be shared across machine as long as they have the same overlay;
+ros_home uri is a runtime resource and should be prepared before each run on given machine.
 
-monoparam will rewrite local file URI as ros_home URI,
+monoparam will rewrite local file uri as ros_home uri,
 and collect all synchronization tasks then hand over to monoresource.
 this is done by parameter resolver,
 that means the path you get during the launch script and in the node are different.
 with this mechanism, you can reference local files in your yaml file as a !resource,
-and in any node run on any machine, you can read that file through the resolved resource URI.
+and in any node run on any machine, you can read that file through the resolved resource uri.
 
-to make a single resource URI that is accessible on any machine,
+to make a single resource uri that is accessible on any machine,
 a meaningful, generic path prefix is needed, and `$ROS_HOME` is the most suitable.
 however, we don't allow environmental variable appear in the path, otherwise the meaning becomes runtime dependent.
-ros_home URI is invented for this purpose: it opens a special case for `$ROS_HOME`, and anyone can understand it at a glance.
+ros_home uri is invented for this purpose: it opens a special case for `$ROS_HOME`, and anyone can understand it at a glance.
 
 local resources will be synchronized to the machine when it is loaded/set into monolaunch,
 that is,
@@ -886,12 +827,12 @@ file: !resource file://path/to/local.png?runtime_machine=machine://...
 config: !include path/to/config.yaml#/sub/field?runtime_machine=machine://...
 ```
 where the query string contains all necessary information for synchronization.
-note that the syntax is slightly different from the standard URL.
+note that the syntax is slightly different from the standard url.
 the context will be inherited during resolving inclusion,
 so all contained resources will be synchronized to that machine.
 it is just for resolver, it should be eliminated after resolving.
 
-we will warn the case of the synchronized resource URI being assigned to
+we will warn the case of the synchronized resource uri being assigned to
 the private namespace of a node run on the different machine.
 best practice is to always set up resources within the private scope of the nodes that need these files:
 ```python
@@ -904,3 +845,105 @@ we cannot restrict users to using only this method,
 because `set_param` and `load_param` can also be used elsewhere,
 and we cannot check it without look into included yaml files.
 
+
+## Schema
+yaml files can be annotated directly with schema.
+simply add `$schema: path/to/your.schema.json` to the root level in the yaml file,
+and lsp should be able to recognize it, but it probably cannot understand tags `!include`/`!merge`/`!resource`.
+to use schema based type checking in monolaunch, you should use `PathWithJPointer.with_schema`, see above.
+
+we only support a specific form of json schema:
+```
+<schema>  = {                             // struct
+              "type": "object",
+              "properties": {
+                (<string>: <schema>,)*
+              }
+            }
+          | {                             // dict
+              "type": "object",
+              "additionalProperties": <schema>
+            }
+          | {                             // array
+              "type": "array",
+              "items": <schema>
+            }
+          | { "type": "null" }            // null
+          | {                             // scalar
+              "type": "boolean" | "integer" | "number" | "string"
+            }
+          | { "enum": [ (<scalar>,)* ] }  // enumerated values
+          | { "const": <scalar> }         // constant values
+          | { "anyOf": [ <schema> ] }     // wrap
+          | { "$ref": <path> }            // ref
+          | {}                            // any
+```
+each `<schema>` (except for ref) can have additional properties for metadata:
+```
+<metadata>  = {
+                ("description": <string>,)?
+                ("oneOf": [ ({ "const": <json> },)* ],)?
+                ("default": <json>,)?
+                ("minimum": <number>,)?
+                ("maximum": <number>,)?
+              }
+```
+struct and dict are for map, but struct must have fixed numbers of keys,
+and you cannot mix struct and dict;
+only one case is allowed in anyOf, it is just for wrapping up a schema so that additional metadata can be attached.
+
+we allow some fields in yaml file to be absence,
+which will then be filled in with proper default values,
+so that we don't need to write down everything.
+such mechanism required an explicit structure definition.
+different types have different default value resolving rules
+- seq: `[]`
+- dict: `{}`
+- struct: `{ <key1>: <default value of this field>, ... }`
+- null: `null`
+- scalar: default value described by metadata, or zero value of given type
+- enum: default value described by metadata, or the first value of enum
+- wrap: default value of underlying type
+- ref: default value of underlying type
+- any: `null`
+note that dict and struct both are encoded into map, but have different defaulting behavior.
+similar to the merging rules, we treat null as an empty slot:
+value `null` annotated with given schema will be resolved to the corresponding default value.
+for example, `{ x: 1.0, y: 2.0, z: null }` just behaves like `{ x: 1.0, y: 2.0 }`,
+which is resolved to `{ x: 1.0, y: 2.0, z: 0.0 }` for point type.
+
+even though parameters can be grouped up structurally,
+ros only provides unstructured paramater getting/setting methods,
+you can access any field as any type with random default value anywhere and anytime,
+which is flexible but terrible to manage.
+to find the full parameter list of a node required, you have to search over entire codebase.
+the best way is to define parameter type once, load once and use everywhere.
+parameter types can be defined in separate place,
+and be aggregated into one giant parameter group at the entry of the node,
+then you only need to load into this parameter group once,
+and all possible configuration errors will be revealed early.
+
+json schema offers similar benefits.
+it allows the advantages of type checking to be realized in data format and resolver.
+with json pointer attached with schema, content will be type-checked during `get_value` and `load_param`.
+compared with non-typed version, you have to deal with absence of `get_value` and assign proper default value,
+which make the parsing logic be scattered throughout the launch script.
+`with_schema` provides a way to setup schema of full config file once and use everywhere.
+
+monolaunch doesn't utilize python's static type checking because it is hard to integrate typing between multiple languages.
+on the other hand, with json schema, external types can be included dynamically in any language.
+another reason is:
+I want to nerf the use of deserialization, otherwise the utility of `load_param` will be greatly reduced.
+it is clearly that parsing full configuration directly is easier
+```python
+my_config = MyConfig.from_json(my_config_link) # read data and statically type checked 
+set_param({
+    "config": my_config.node_config, # this become easier and statically type checked
+})
+load_param({
+    "config": my_config_link / "node_config", # this is relatively harder and dynamically type checked
+})
+```
+however, `load_param` is the better for the future use:
+don't resolve config in the generation phase, include it, so that you can change it before launch phase.
+the ease of full deserializing becomes a trap here.
