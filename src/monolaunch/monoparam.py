@@ -890,7 +890,7 @@ class SchemaSource:
     def access(self) -> SchemaAccessType:
         assert self.is_direct()
         
-        if isinstance(self.data, dict) and not self.data:
+        if isinstance(self.data, dict) and self.data.get("type") is None:
             return "any", None
 
         if (isinstance(self.data, dict) and isinstance(enum := self.data.get("enum"), list)
