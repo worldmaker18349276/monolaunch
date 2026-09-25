@@ -877,9 +877,12 @@ class SchemaSource:
             return SchemaSource(self.link.append("anyOf").append(0), anyOf[0])
         return None
 
-    def get_ref(self) -> Optional[PathWithJPointer]:
+    def get_ref(self) -> Optional[Union[PathWithJPointer, JPointer]]:
         if isinstance(self.data, dict) and isinstance(ref := self.data.get("$ref", None), str):
-            return PathWithJPointer.parse(ref) # TODO: our parsing order is different from the standard
+            if ref.startswith("#"):
+                return JPointer.parse(ref[1:])
+            else:
+                return PathWithJPointer.parse(ref) # TODO: our parsing order is different from the standard
         return None
 
     def is_direct(self) -> bool:
@@ -991,8 +994,11 @@ class SchemaSource:
     def resolve_path(self, path: Path) -> Path:
         return (self.link.filepath.parent / path).resolve()
 
-    def resolve_link(self, link: PathWithJPointer) -> PathWithJPointer:
-        return PathWithJPointer(self.resolve_path(link.filepath), link.fieldpath)
+    def resolve_link(self, link: Union[PathWithJPointer, JPointer]) -> PathWithJPointer:
+        if isinstance(link, JPointer):
+            return PathWithJPointer(self.link.filepath, link)
+        else:
+            return PathWithJPointer(self.resolve_path(link.filepath), link.fieldpath)
 
     @raises(SchemaLoadError)
     @staticmethod
