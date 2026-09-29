@@ -1138,7 +1138,7 @@ class SourcedNode:
     schema: Optional[SchemaSource] = None
 
     def is_direct(self) -> bool:
-        return all(not source.is_direct() for source in self.sources) and (self.schema is None or self.schema.is_direct())
+        return all(source.is_direct() for source in self.sources) and (self.schema is None or self.schema.is_direct())
     
     def print(self, stream: Optional[IO[str]] = None):
         stream = stream if stream is not None else sys.stdout
@@ -1374,7 +1374,7 @@ class SourceLoader:
                     continue
 
                 if isinstance(data, Merge):
-                    for i in range(len(data.items)):
+                    for i in range(len(data.items))[::-1]:
                         source_i = Source(source.link.append(i), data.items, i, source.context)
                         inputs.append((source_i, fieldpath))
                     continue
@@ -1426,7 +1426,9 @@ class SourceLoader:
         
         if error.errors:
             raise error
-        return SourcedNode(node.link, sources, schema), depends
+        node = SourcedNode(node.link, sources, schema)
+        assert node.is_direct()
+        return node, depends
 
     @raises(FieldAccessWarning, SchemaFieldAccessWarning)
     def _get(self, node: SourcedNode, type_keys: AccessType, key: str) -> Optional[SourcedNode]:
@@ -1669,6 +1671,8 @@ class SourceLoader:
 
         self._ensure_top(node, ensure_null)
         node, _depends = self.resolve_indirect_(node)
+        if ensure_null:
+            assert node.sources[-1].data is None
         return node
 
     @raises(FormatErrorGroup, TypeError,
@@ -1723,10 +1727,7 @@ class SourceLoader:
             include = self.sync_resource_manager.attach_machine(include, machine)
 
         subnode = self._ensure_walk(node, fieldpath, True)
-
-        source = subnode.sources[-1]
-        assert source.data is None
-        source.data = include
+        subnode.sources[-1].data = include
 
 
 @raises(FormatErrorGroup,
