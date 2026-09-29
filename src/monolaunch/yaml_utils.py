@@ -75,7 +75,7 @@ you can use `python -m monolaunch.yaml_utils <yaml file>` directly to resolve YA
 from inspect import cleandoc
 import math
 import re
-from typing import Any, Dict, Generator, List, Set, Tuple, Union, Optional, cast
+from typing import Any, Dict, Generator, List, Sequence, Set, Tuple, Union, Optional, cast
 from pathlib import Path
 import urllib.parse
 from dataclasses import dataclass, field
@@ -85,7 +85,7 @@ __all__ = [
     "JSONScalar", "JSON",
     "is_JSON", "assert_JSON",
     "deep_update", "deep_merge", "deep_copy", "deep_eq", "deep_diff", "deep_iter",
-    "FieldAccessError", "JPointer", "PathWithJPointer", "TypedPathWithJPointer",
+    "FieldAccessError", "JsonPath", "JPointer", "PathWithJPointer", "TypedPathWithJPointer",
     "SimpleYAMLLoader", "load_YAML", "SimpleYAMLDumper", "save_YAML",
     "TaggedScalar", "TaggedDict", "TaggedList", "TaggedJSON",
     "ExYAMLLoader", "load_ExYAML", "ExYAMLDumper", "save_ExYAML",
@@ -348,6 +348,8 @@ def urlquote(s: str, unsafe: str = r"#@/:;?") -> str:
         s,
     )
 
+JsonPath = Sequence[Union[int, str]]
+
 @dataclass(frozen=True)
 class JPointer:
     """
@@ -368,6 +370,10 @@ class JPointer:
         if not fieldpath.startswith("/"):
             raise InvalidJPointerFormat(fieldpath)
         return JPointer(tuple(e.replace("~1", "/").replace("~0", "~") for e in fieldpath[1:].split("/")))
+
+    @staticmethod
+    def from_list(fieldpath: JsonPath) -> "JPointer":
+        return JPointer(tuple(str(e) for e in fieldpath))
 
     def __str__(self) -> str:
         # minimal escape

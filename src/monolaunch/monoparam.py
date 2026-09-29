@@ -198,22 +198,22 @@ def SourcedJSON_deep_diff(old: SourcedJSON, new: SourcedJSON) -> Dict[JPointer, 
 
     return updated
 
-def SourcedJSON_deep_iter(obj: SourcedJSON) -> Generator[Tuple[JPointer, JPointer, Union[bool, int, float, str, "Resource", "Include"]], None, None]:
+def SourcedJSON_deep_iter(obj: SourcedJSON) -> Generator[Tuple[JsonPath, JsonPath, Union[bool, int, float, str, "Resource", "Include"]], None, None]:
     """
     two paths are raw field path and resolved path
     """
-    stack = [(JPointer(), JPointer(), obj)]
+    stack: List[Tuple[JsonPath, JsonPath, SourcedJSON]] = [((), (), obj)]
     while stack:
         raw_path, path, value = stack.pop()
         if isinstance(value, dict):
             for key in list(value.keys()):
-                stack.append((raw_path.append(key), path.append(key), value[key]))
+                stack.append(((*raw_path, key), (*path, key), value[key]))
         elif isinstance(value, list):
             for key in range(len(value)):
-                stack.append((raw_path.append(key), path.append(key), value[key]))
+                stack.append(((*raw_path, key), (*path, key), value[key]))
         elif isinstance(value, Merge):
             for key in range(len(value.items)):
-                stack.append((raw_path.append(key), path, value.items[key]))
+                stack.append(((*raw_path, key), path, value.items[key]))
         elif value is None:
             # skip None
             pass
@@ -1431,19 +1431,29 @@ class SourceLoader:
         return node, depends
 
     @raises(FieldAccessWarning, SchemaFieldAccessWarning)
-    def _get(self, node: SourcedNode, type_keys: AccessType, key: str) -> Optional[SourcedNode]:
+    def _get(self, node: SourcedNode, type_keys: AccessType, key: Union[str, int], is_untyped_key: bool = True) -> Optional[SourcedNode]:
         # assert node.is_direct()
 
         if type_keys[0] == "map":
-            if key not in type_keys[1]:
-                warnings.warn(FieldAccessWarning(node.link.append(key)))
-                return None
-            key_ = key
+            if is_untyped_key:
+                if str(key) not in type_keys[1]:
+                    warnings.warn(FieldAccessWarning(node.link.append(key)))
+                    return None
+            else:
+                if not isinstance(key, str) or key not in type_keys[1]:
+                    warnings.warn(FieldAccessWarning(node.link.append(key)))
+                    return None
+            key_ = str(key)
 
         elif type_keys[0] == "seq":
-            if not JPointer.is_index(key) or int(key) not in type_keys[1]:
-                warnings.warn(FieldAccessWarning(node.link.append(key)))
-                return None
+            if is_untyped_key:
+                if not JPointer.is_index(str(key)) or int(key) not in type_keys[1]:
+                    warnings.warn(FieldAccessWarning(node.link.append(key)))
+                    return None
+            else:
+                if not isinstance(key, int) or key not in type_keys[1]:
+                    warnings.warn(FieldAccessWarning(node.link.append(key)))
+                    return None
             key_ = int(key)
 
         else:
@@ -1464,14 +1474,16 @@ class SourceLoader:
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
             SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
             FieldAccessWarning, SchemaFieldAccessWarning)
-    def walk_(self, node: SourcedNode, fieldpath: JPointer) -> Tuple[Optional[SourcedNode], Set[Path]]:
+    def walk_(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath]) -> Tuple[Optional[SourcedNode], Set[Path]]:
         depends: Set[Path] = set()
-        for key in fieldpath.elements:
+        is_untyped_key = isinstance(fieldpath, JPointer)
+        elements = fieldpath.elements if isinstance(fieldpath, JPointer) else fieldpath
+        for key in elements:
             node, depends_ = self.resolve_indirect_(node)
             depends.update(depends_)
 
             type_keys = node.access()
-            node_ = self._get(node, type_keys, key)
+            node_ = self._get(node, type_keys, key, is_untyped_key)
             if node_ is None:
                 return None, depends
             node = node_
@@ -1482,7 +1494,7 @@ class SourceLoader:
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
             SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
             FieldAccessWarning, SchemaFieldAccessWarning)
-    def walk(self, node: SourcedNode, fieldpath: JPointer) -> Optional[SourcedNode]:
+    def walk(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath]) -> Optional[SourcedNode]:
         return self.walk_(node, fieldpath)[0]
 
     @raises(SourceLoadError)
@@ -1655,13 +1667,18 @@ class SourceLoader:
             SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             FieldValueOverwriteWarning)
-    def _ensure_walk(self, node: SourcedNode, fieldpath: JPointer, ensure_null: bool) -> SourcedNode:
-        for key in fieldpath.elements:
+    def _ensure_walk(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], ensure_null: bool) -> SourcedNode:
+        is_untyped_key = isinstance(fieldpath, JPointer)
+        elements = fieldpath.elements if isinstance(fieldpath, JPointer) else fieldpath
+        for key in elements:
             self._ensure_top(node, False)
             node, _depends = self.resolve_indirect_(node)
 
             typ = node.access()[0]
-            key_ = int(key) if typ == "seq" and JPointer.is_index(key) else key
+            if typ == "seq":
+                key_ = int(key) if is_untyped_key and JPointer.is_index(str(key)) else key
+            else:
+                key_ = str(key) if is_untyped_key else key
             self._ensure_get(node, typ, key_)
 
             type_keys = node.access()
@@ -1680,7 +1697,7 @@ class SourceLoader:
             SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             FieldValueOverwriteWarning)
-    def update(self, node: SourcedNode, fieldpath: JPointer, value: Union[JSONScalar, Path], machine: str = ""):
+    def update(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], value: Union[JSONScalar, Path], machine: str = ""):
         """
         update sourced node.
         only the file of current top layer will be mutated.
@@ -1711,7 +1728,7 @@ class SourceLoader:
             SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             FieldValueOverwriteWarning)
-    def include(self, node: SourcedNode, fieldpath: JPointer, value: Union[str, Path, PathWithJPointer], machine: str = ""):
+    def include(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], value: Union[str, Path, PathWithJPointer], machine: str = ""):
         """
         insert include into sourced node.
         only the file of current top layer will be mutated.

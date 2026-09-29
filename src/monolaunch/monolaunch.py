@@ -28,7 +28,7 @@ import os
 import shlex
 from uuid import uuid4
 import yaml
-from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, PathWithJPointer, TypedPathWithJPointer
+from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, JsonPath, PathWithJPointer, TypedPathWithJPointer
 from . import monoparam
 from .monoparam import FieldAccessWarning, Resource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
@@ -55,19 +55,19 @@ def parse_rosparam_path(path: str) -> Tuple[str, ...]:
     return tuple(e for e in path.strip("/").split("/") if e)
 
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple[JPointer, Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
+def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple[JsonPath, Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JPointer, Union[str, Path, PathWithJPointer, "TypedPathWithJPointer"]], None, None]: ...
-def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JPointer, JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
-    stack = [(JPointer(), folded_dict)]
+def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JsonPath, Union[str, Path, PathWithJPointer, "TypedPathWithJPointer"]], None, None]: ...
+def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JsonPath, JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
+    stack: List[Tuple[JsonPath, JSON]] = [((), folded_dict)]
     while stack:
         path, value = stack.pop()
         if isinstance(value, dict):
             for subpath in list(value.keys()):
-                stack.append((path.extend(JPointer(parse_rosparam_path(subpath))), value[subpath]))
+                stack.append(((*path, *parse_rosparam_path(subpath)), value[subpath]))
         elif isinstance(value, list):
             for key in range(len(value)):
-                stack.append((path.append(key), value[key]))
+                stack.append(((*path, key), value[key]))
         elif value is None:
             # skip None
             pass
@@ -892,7 +892,7 @@ def check_foreign_sync_resources(ctx: Ctx):
             if isinstance(value, (monoparam.Include, monoparam.Resource)):
                 runtime_machine = dict(value.context).get("runtime_machine")
                 runtime_machine_key = MachineCtx.parse(runtime_machine).machine if runtime_machine is not None else None
-                host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and JPointer((*node.ns, node.name)).is_prefix(path)), None)
+                host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and JPointer((*node.ns, node.name)).is_prefix(JPointer.from_list(path))), None)
                 host_machine_key = host_node.machine.machine if host_node is not None and host_node.machine is not None else None
                 if host_machine_key != runtime_machine_key:
                     resource_name = f"!include {value.link}" if isinstance(value, monoparam.Include) else value.uri
