@@ -870,8 +870,9 @@ def set_logger(config: Dict[str, Literal["DEBUG", "INFO", "WARN", "ERROR", "FATA
     ctx().set_logger(config)
 
 class ForeignSyncResourceWarning(Warning):
-    def __init__(self, resource_name: str, runtime_machine_name: str, host_node_name: str, host_machine_name: str):
+    def __init__(self, resource_name: str, param_name: JPointer, runtime_machine_name: str, host_node_name: str, host_machine_name: str):
         self.resource_name = resource_name
+        self.param_name = param_name
         self.runtime_machine_name = runtime_machine_name
         self.host_node_name = host_node_name
         self.host_machine_name = host_machine_name
@@ -879,7 +880,8 @@ class ForeignSyncResourceWarning(Warning):
     def __str__(self):
         return (
             f"resource {self.resource_name} "
-            f"sync to machine {self.runtime_machine_name} "
+            f"sync to {self.param_name} "
+            f"under machine {self.runtime_machine_name} "
             f"but it is a param under {self.host_node_name}"
             + (f" ({self.host_machine_name})" if self.host_machine_name else "")
         )
@@ -888,11 +890,21 @@ def check_foreign_sync_resources(ctx: Ctx):
     if ctx.param_node is None: return
     for source in ctx.param_node.sources:
         for _raw_path, path, value in SourcedJSON_deep_iter(source.data):
+            param_name = JPointer.from_list(path)
             # strip until index element
             if isinstance(value, (monoparam.Include, monoparam.Resource)):
                 runtime_machine = dict(value.context).get("runtime_machine")
                 runtime_machine_key = MachineCtx.parse(runtime_machine).machine if runtime_machine is not None else None
-                host_node = next((node for node in ctx.nodes.values() if isinstance(node, Node) and JPointer((*node.ns, node.name)).is_prefix(JPointer.from_list(path))), None)
+                host_node = None
+                for node in ctx.nodes.values():
+                    if isinstance(node, Node):
+                        if JPointer((*node.ns, node.name)).is_prefix(param_name):
+                            host_node = node
+                            break
+                    else:
+                        if JPointer(node.ns).is_prefix(param_name):
+                            host_node = node
+                            break
                 host_machine_key = host_node.machine.machine if host_node is not None and host_node.machine is not None else None
                 if host_machine_key != runtime_machine_key:
                     resource_name = f"!include {value.link}" if isinstance(value, monoparam.Include) else value.uri
@@ -900,11 +912,14 @@ def check_foreign_sync_resources(ctx: Ctx):
                     if host_node is None:
                         host_node_name = "public namespace"
                         host_machine_name = ""
-                    else:
-                        assert isinstance(host_node, Node)
+                    elif isinstance(host_node, Node):
                         host_machine_name = str(host_node.machine or "local machine")
                         host_node_name = f"node {_join_ns((*host_node.ns, host_node.name))}"
-                    warnings.warn(ForeignSyncResourceWarning(resource_name, runtime_machine_name, host_node_name, host_machine_name))
+                    else:
+                        host_machine_name = str(host_node.machine or "local machine")
+                        host_node_name = f"included launch file {_join_ns(host_node.ns)}"
+
+                    warnings.warn(ForeignSyncResourceWarning(resource_name, param_name, runtime_machine_name, host_node_name, host_machine_name))
 
 FILENAME_EXPR = """
 (lambda p:
