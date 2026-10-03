@@ -1057,49 +1057,61 @@ def run(launch_func: Callable[[], None]) -> Any:
     if launch_func.__globals__["__name__"] != "__main__":
         return launch_func
     # only run on main
-    def formatwarning(message: str, category: Type[Warning], _filename: Any, _lineno: Any, _file:Any=None, _line:Any=None):
-        return f"{category.__name__}: {message}\n"
-    warnings.formatwarning = formatwarning
     cmd = _run(launch_func)
     cmd()
 
 def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
     argparser = argparse.ArgumentParser(
         add_help=False,
-        usage="%(prog)s [--dry-run STAGE] [ARGS ...]",
+        usage="%(prog)s [--gen-verbose] [--dry-run STAGE] [ARGS ...]",
     )
     argparser.add_argument(
         "--dry-run",
         type=int, choices=range(4), default=0,
         help="0: just run, 1: until generating launch file, 2: until resolving yaml file, 3: until syncing resources"
     )
+    argparser.add_argument(
+        "--gen-verbose",
+        action="store_true",
+        help="increase output verbosity during generation phase"
+    )
     if "-h" in sys.argv or "--help" in sys.argv:
         argparser.print_help()
     args, unknown = argparser.parse_known_args()
     dry_run = int(args.dry_run)
+    verbose = bool(args.gen_verbose)
     need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
     os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
     cmd = [sys.executable, *sys.argv]
     sys.argv[1:] = unknown
-    
-    try:
-        launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
-    except Exception:
-        traceback.print_exc()
-        return lambda: exit(1)
-    except _Regenerate as regen:
-        cmd = regen.machine.command(cmd)
-        print("regenerate launch file with local env-loader:\n" + shlex.join(cmd))
-        return lambda: os.execvp(cmd[0], cmd)
 
-    cmd = ("roslaunch", str(launch_filepath), *sys.argv[1:])
-    if dry_run == 1:
-        print("will not execute because --dry-run=1:\n" + shlex.join(cmd))
-        return lambda: exit(0)
-    if dry_run > 0:
-        cmd = (*cmd, f"dry_run:={dry_run}")
-    print("start launch:\n" + shlex.join(cmd))
-    return lambda: os.execvp(cmd[0], cmd)
+    with warnings.catch_warnings():
+        def showwarning(message: str, category: Type[Warning], filename: Any, lineno: Any, file:Any=None, line:Any=None):
+            if not verbose:
+                print(f"{category.__name__}: {message}", file=sys.stderr)
+            else:
+                print(f"{filename}:{lineno}: {category.__name__}: {message}", file=sys.stderr)
+                traceback.print_stack()
+        warnings.showwarning = showwarning
+    
+        try:
+            launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
+        except Exception:
+            traceback.print_exc()
+            return lambda: exit(1)
+        except _Regenerate as regen:
+            cmd = regen.machine.command(cmd)
+            print("regenerate launch file with local env-loader:\n" + shlex.join(cmd))
+            return lambda: os.execvp(cmd[0], cmd)
+
+        cmd = ("roslaunch", str(launch_filepath), *sys.argv[1:])
+        if dry_run == 1:
+            print("will not execute because --dry-run=1:\n" + shlex.join(cmd))
+            return lambda: exit(0)
+        if dry_run > 0:
+            cmd = (*cmd, f"dry_run:={dry_run}")
+        print("start launch:\n" + shlex.join(cmd))
+        return lambda: os.execvp(cmd[0], cmd)
 
 TABSIZE = 4
 
