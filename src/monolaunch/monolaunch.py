@@ -1063,7 +1063,7 @@ def run(launch_func: Callable[[], None]) -> Any:
 def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
     argparser = argparse.ArgumentParser(
         add_help=False,
-        usage="%(prog)s [--gen-verbose] [--dry-run STAGE] [ARGS ...]",
+        usage="%(prog)s [--gen-verbose] [--sync-latest-logs] [--dry-run STAGE] [ARGS ...]",
     )
     argparser.add_argument(
         "--dry-run",
@@ -1075,11 +1075,17 @@ def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
         action="store_true",
         help="increase output verbosity during generation phase"
     )
+    argparser.add_argument(
+        "--sync-latest-logs",
+        action="store_true",
+        help="synchronize latest logs from remote machines instead of launching them"
+    )
     if "-h" in sys.argv or "--help" in sys.argv:
         argparser.print_help()
     args, unknown = argparser.parse_known_args()
     dry_run = int(args.dry_run)
     verbose = bool(args.gen_verbose)
+    sync_latest_logs = bool(args.sync_latest_logs)
     need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
     os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
     cmd = [sys.executable, *sys.argv]
@@ -1110,6 +1116,10 @@ def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
             return lambda: exit(0)
         if dry_run > 0:
             cmd = (*cmd, f"dry_run:={dry_run}")
+        if sync_latest_logs:
+            cmd = ("rosrun", "monolaunch", "sync_latest_logs.py", str(launch_filepath))
+            print("synchronize latest logs:\n" + shlex.join(cmd))
+            return lambda: os.execvp(cmd[0], cmd)
         print("start launch:\n" + shlex.join(cmd))
         return lambda: os.execvp(cmd[0], cmd)
 

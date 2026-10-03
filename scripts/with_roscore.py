@@ -109,7 +109,7 @@ def main():
     command = local.command(command)
 
     print("[with_roscore] run roscore:\n" + shlex.join(roscore))
-    #                  _________________ to prevent SIGINT propagates into subprocess
+    #                             _________________ to prevent SIGINT propagates into subprocess
     with prun("roscore", roscore, start_new_session=True):
         print("[with_roscore] run roslaunch:\n" + shlex.join(command))
         with prun("roslaunch", command, force_exit=True, exit_timeout=30) as roslaunch_proc:
