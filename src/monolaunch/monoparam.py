@@ -1880,16 +1880,15 @@ class YAMLWatcher:
         if aggregate_sync_resources:
             assert sync_resources is not None
             sync_resources_json = SyncInfo.to_list(sync_resources)
-            if sync_resources_json:
-                data = data if data is not None else {}
+            data = data if data is not None else {}
 
-                if not isinstance(data, dict):
-                    warnings.warn(RootIsNotMapWarning(self.path))
-                    return
+            if not isinstance(data, dict):
+                warnings.warn(RootIsNotMapWarning(self.path))
+                return
 
-                if not isinstance(data.get("$sync_resources"), list):
-                    data["$sync_resources"] = []
-                cast(List[JSON], data["$sync_resources"]).extend(sync_resources_json)
+            if not isinstance(data.get("$sync_resources"), list):
+                data["$sync_resources"] = []
+            cast(List[JSON], data["$sync_resources"]).extend(sync_resources_json)
 
         self.depends = depends
         self.node = node
