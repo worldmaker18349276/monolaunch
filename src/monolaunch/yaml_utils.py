@@ -510,9 +510,13 @@ class TypedPathWithJPointer(PathWithJPointer):
     def create(cls, link: Union[str, Path, "PathWithJPointer", "TypedPathWithJPointer"]) -> "TypedPathWithJPointer":
         if isinstance(link, str):
             link = cls.parse(link)
+            link = cls(link.filepath, link.fieldpath)
         elif isinstance(link, Path):
             link = cls(link)
-        link = cls(link.filepath, link.fieldpath)
+        elif isinstance(link, TypedPathWithJPointer):
+            pass
+        else:
+            link = cls(link.filepath, link.fieldpath)
         return link
 
     def __truediv__(self, key: Union[int, str, JPointer]) -> "TypedPathWithJPointer":
