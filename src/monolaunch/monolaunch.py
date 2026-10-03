@@ -30,7 +30,7 @@ from uuid import uuid4
 import yaml
 from monolaunch.yaml_utils import JSON, FieldAccessError, JPointer, JSONScalar, JsonPath, PathWithJPointer, TypedPathWithJPointer
 from . import monoparam
-from .monoparam import FieldAccessWarning, Resource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
+from .monoparam import FieldAccessWarning, Resource, SchemaSource, SourceLoader, SourcedJSON_deep_iter, SourcedNode, SourcedYAMLDumper
 from .monoresource import Machine
 
 __all__ = [
@@ -283,7 +283,7 @@ class Ctx:
             warnings.simplefilter("error", FieldAccessWarning)
             tmp_param_node = self.param_loader.walk(tmp_param_node, link.fieldpath[:link.schema_root])
             assert tmp_param_node is not None
-        if link.schema != {}:
+        if not SchemaSource.is_any(link.schema):
             tmp_param_node = self.param_loader.with_new_schema(tmp_param_node, None, link.schema)
 
         # special attr
@@ -673,11 +673,11 @@ def get_value(link: Union[str, Path, PathWithJPointer, TypedPathWithJPointer], e
     if isinstance(link, TypedPathWithJPointer):
         pass
     elif isinstance(link, PathWithJPointer):
-        link = link.with_schema({})
+        link = link.with_schema()
     elif isinstance(link, Path):
         link = TypedPathWithJPointer(link)
     elif isinstance(link, str): # pyright: ignore[reportUnnecessaryIsInstance]
-        link = PathWithJPointer.parse(link).with_schema({})
+        link = PathWithJPointer.parse(link).with_schema()
     else:
         raise TypeError(type(link))
 
@@ -848,13 +848,13 @@ def load_logger(config_link: Union[str, Path, PathWithJPointer, TypedPathWithJPo
     about config format, see `set_logger`.
     """
     if isinstance(config_link, str):
-        config_link = PathWithJPointer.parse(config_link).with_schema({})
+        config_link = PathWithJPointer.parse(config_link).with_schema()
     elif isinstance(config_link, Path):
         config_link = TypedPathWithJPointer(config_link)
     elif isinstance(config_link, TypedPathWithJPointer):
         pass
     elif isinstance(config_link, PathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
-        config_link = config_link.with_schema({})
+        config_link = config_link.with_schema()
     else:
         raise TypeError(type(config_link))
 

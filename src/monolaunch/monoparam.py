@@ -872,6 +872,41 @@ class SchemaSource:
     def any() -> "SchemaSource":
         return SchemaSource(PathWithJPointer(), {})
 
+    @staticmethod
+    def is_any(schema: SchemaJSON) -> bool:
+        """
+        determine if it is definitely an any type, such as:
+        - True
+        - {}
+        - {"type": ["null", "boolean", "number", "string", "array", "object"]}
+        - {"description": "an any type", "default": null}
+        it doesn't check in depth, other cases will be considered negative.
+        """
+        if schema is True:
+            return True
+        if not isinstance(schema, dict):
+            return False
+
+        _SCHEMA_ALL_TYPES = {"null", "boolean", "object", "array", "number", "string"}
+
+        _SCHEMA_ANNOTATIONS = {
+            "$schema", "$id", "id", "$comment", "$defs", "definitions",
+            "title", "description", "default", "examples",
+            "deprecated", "readOnly", "writeOnly",
+        }
+
+        for key, value in schema.items():
+            if key in _SCHEMA_ANNOTATIONS:
+                continue
+            if key == "type":
+                types = {value} if isinstance(value, str) else set(value) if isinstance(value, list) else None
+                if types is None or not _SCHEMA_ALL_TYPES <= types:
+                    return False
+                continue
+            return False
+
+        return True
+
     def get_inner(self) -> Optional["SchemaSource"]:
         if isinstance(self.data, dict) and isinstance(anyOf := self.data.get("anyOf", []), list) and len(anyOf) == 1:
             return SchemaSource(self.link.append("anyOf").append(0), anyOf[0])
@@ -893,7 +928,7 @@ class SchemaSource:
     def access(self) -> SchemaAccessType:
         assert self.is_direct()
         
-        if isinstance(self.data, dict) and isinstance(typ := self.data.get("type"), list) and set(typ) == {"null", "boolean", "integer", "number", "string", "array", "object"}:
+        if self.is_any(self.data):
             return "any", None
 
         if (isinstance(self.data, dict) and isinstance(enum := self.data.get("enum"), list)

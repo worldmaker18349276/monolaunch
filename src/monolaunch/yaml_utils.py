@@ -456,7 +456,10 @@ class PathWithJPointer:
         fieldpath = urllib.parse.unquote(fieldpath)
         return cls(Path(filepath), JPointer.parse(fieldpath))
 
-    def with_schema(self, schema: Union[str, Path, JSON]) -> "TypedPathWithJPointer":
+    def with_schema(self, schema: Union[None, str, Path, JSON] = None) -> "TypedPathWithJPointer":
+        if schema is None:
+            # any type
+            schema = {}
         if isinstance(schema, (str, Path)):
             schema = cast(JSON, {"$ref": str(schema)})
         return TypedPathWithJPointer(self.filepath, self.fieldpath, schema, len(self.fieldpath.elements))
