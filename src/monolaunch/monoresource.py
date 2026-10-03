@@ -23,6 +23,15 @@ from monolaunch.yaml_utils import FieldAccessError, assert_JSON, PathWithJPointe
 
 IP_REGEX = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
+def get_local_addresses() -> List[str]:
+    import rosgraph.network
+    return rosgraph.network.get_local_addresses()
+
+def getuser() -> str:
+    import getpass
+    return getpass.getuser()
+
+
 class SchemeParseError(Exception):
     def __init__(self, scheme: str, url: str, format: str = ""):
         self.scheme = scheme
@@ -30,7 +39,7 @@ class SchemeParseError(Exception):
         self.format = format
     
     def __str__(self):
-        return f"invalid {self.scheme} scheme url: {self.url}" + (f"\nformat: {self.format}" if self.format else "")
+        return f"invalid {self.scheme} scheme url: {self.url}" + (f"\nexpected format: {self.format}" if self.format else "")
 
 @dataclasses.dataclass(frozen=True)
 class Machine:
@@ -127,16 +136,14 @@ class Machine:
             machine_ips = [host[4][0] for host in socket.getaddrinfo(self.address, 0, 0, 0, socket.SOL_TCP) if isinstance(host[4][0], str)]
         except socket.gaierror:
             raise ValueError(f"cannot resolve host address for machine [{self.address}]")
-        import rosgraph.network
-        local_addresses = ['localhost'] + rosgraph.network.get_local_addresses()
+        local_addresses = ['localhost'] + get_local_addresses()
         # check 127/8 and local addresses
         is_local = ([ip for ip in machine_ips if (ip.startswith('127.') or ip == '::1')] != [])
         is_local = is_local or (set(machine_ips) & set(local_addresses) != set())
 
         #491: override local to be ssh if machine.user != local user
         if is_local and self.user:
-            import getpass
-            is_local = self.user == getpass.getuser()
+            is_local = self.user == getuser()
         return is_local
 
     def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True, cwd: Optional[Path] = None, tt: bool = False) -> Tuple[str, ...]:
@@ -150,14 +157,13 @@ class Machine:
         remote_args = ["ssh", *(["-tt"] if tt else []), f"{self.user}@{self.address}" if self.user else self.address]
         return (*password_args, *remote_args, shlex.join(remote_cmd))
 
-# TODO: ban unset
-# TODO: prevent bad path
-# TODO: expandvars with nounset
+# unset variable is invalid
 def expandvars(path: str) -> str:
     import os
     os.environ['DOLLARSIGN'] = '$'
     os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))
-    return os.path.expandvars(path)
+    import re
+    return re.compile(r'\$\{([^}]+)\}').sub(lambda m: os.environ[m.group(1)], path)
 
 # TODO: too slow!
 def remote_expandvars(machine: Machine, path: str) -> str:
@@ -167,7 +173,9 @@ def remote_expandvars(machine: Machine, path: str) -> str:
             "import os",
             "os.environ['DOLLARSIGN'] = '$'",
             "os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))",
-            f"print(os.path.expandvars({str(path)!r}), end='')"
+            "import re",
+            f"path = {str(path)!r}",
+            r"print(re.compile(r'\$\{([^}]+)\}').sub(lambda m: os.environ[m.group(1)], path), end='')",
         ])
     ])
 
@@ -253,7 +261,7 @@ def sync(params_link: str):
 
     params_link is a link to a yaml file in the format:
     ```
-    - source: /path/to/source/in/local/machine (can contain ${ENVVAR})
+    - source: /path/to/source/in/local/machine   # can contain ${ENVVAR}
       destination: ${ROS_HOME}/path/to/destination/in/remote/machine
       machine: machine://user:pswd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2
     ...
@@ -281,10 +289,11 @@ def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
     cmd = machine.command(["mkdir", "-p", str(remote_tmp_dir)], with_env_loader=False)
     subprocess.run(cmd, check=True)
 
+    password_args = ["sshpass", "-p", machine.password] if machine.password else []
+    is_local = machine.address == "localhost" and machine.user == ""
+    destination_ = ((f"{machine.user}@" if machine.user else "") + f"{machine.address}:" if not is_local else "") + str(destination)
+
     try:
-        password_args = ["sshpass", "-p", machine.password] if machine.password else []
-        is_local = machine.address == "localhost" and machine.user == ""
-        destination_ = ((f"{machine.user}@" if machine.user else "") + f"{machine.address}:" if not is_local else "") + str(destination)
         print(f"transfer {source} -> {destination_}")
         subprocess.run([
             *password_args,
