@@ -1012,13 +1012,17 @@ class SchemaSource:
 
         metadata = SchemaMetadata.parse(self.data)
         if schema_type_value[0] == "scalar":
-            if type(metadata.default) != schema_type_value[1]:
+            if metadata.default is None:
+                return "scalar", schema_type_value[1](), []
+            elif type(metadata.default) != schema_type_value[1]:
                 warnings.warn(SchemaDefaultTypeMismatchWarning(self.link, metadata.default, schema_type_value[1].__name__))
                 return "scalar", schema_type_value[1](), []
             else:
                 return "scalar", cast(JSONScalar, metadata.default), []
         elif schema_type_value[0] == "enum":
-            if metadata.default not in schema_type_value[1]:
+            if metadata.default is None:
+                return "scalar", schema_type_value[1][0], []
+            elif metadata.default not in schema_type_value[1]:
                 enum_str = " | ".join(repr(e) for e in schema_type_value[1])
                 warnings.warn(SchemaDefaultTypeMismatchWarning(self.link, metadata.default, enum_str))
                 return "scalar", schema_type_value[1][0], []
