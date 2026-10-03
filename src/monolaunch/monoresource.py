@@ -15,7 +15,7 @@ import dataclasses
 from pathlib import Path
 import socket
 
-from typing import Any, Generator, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, cast
 import urllib.parse
 from monolaunch.yaml_utils import FieldAccessError, assert_JSON, PathWithJPointer, load_YAML, urlquote
 
@@ -146,15 +146,26 @@ class Machine:
             is_local = self.user == getuser()
         return is_local
 
-    def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True, cwd: Optional[Path] = None, tt: bool = False) -> Tuple[str, ...]:
+    def password_args(self) -> List[str]:
+        return ["sshpass", "-p", self.password] if self.password else []
+
+    def host_prefix(self) -> str:
+        if self.address == "localhost" and self.user == "":
+            return ""
+        return (f"{self.user}@" if self.user else "") + f"{self.address}:"
+
+    def command(self, remote_cmd: Sequence[str], with_env_loader: bool = True, cwd: Optional[Path] = None, tt: bool = False, accept_new: bool = True) -> Tuple[str, ...]:
         if cwd is not None:
             remote_cmd = ["bash", "-c", shlex.join(["cd", str(cwd)]) + "; exec " + shlex.join(remote_cmd)]
         if with_env_loader and self.env_loader:
             remote_cmd = (*self.env_loader, *remote_cmd)
         if self.is_local():
             return tuple(remote_cmd)
-        password_args = ["sshpass", "-p", self.password] if self.password else []
-        remote_args = ["ssh", *(["-tt"] if tt else []), f"{self.user}@{self.address}" if self.user else self.address]
+        password_args = self.password_args()
+        accept_new_args = ["-o", "StrictHostKeyChecking=accept-new"] if accept_new else []
+        tt_args = ["-tt"] if tt else []
+        remote_args = ["ssh", *accept_new_args, *tt_args, f"{self.user}@{self.address}" if self.user else self.address]
+
         return (*password_args, *remote_args, shlex.join(remote_cmd))
 
 # unset variable is invalid
@@ -162,6 +173,7 @@ def expandvars(path: str) -> str:
     import os
     os.environ['DOLLARSIGN'] = '$'
     os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))
+    os.environ['ROS_LOG_DIR'] = os.environ.get('ROS_LOG_DIR', os.path.expandvars('$ROS_HOME/log'))
     import re
     return re.compile(r'\$\{([^}]+)\}').sub(lambda m: os.environ[m.group(1)], path)
 
@@ -173,6 +185,7 @@ def remote_expandvars(machine: Machine, path: str) -> str:
             "import os",
             "os.environ['DOLLARSIGN'] = '$'",
             "os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))",
+            "os.environ['ROS_LOG_DIR'] = os.environ.get('ROS_LOG_DIR', os.path.expandvars('$ROS_HOME/log'))",
             "import re",
             f"path = {str(path)!r}",
             r"print(re.compile(r'\$\{([^}]+)\}').sub(lambda m: os.environ[m.group(1)], path), end='')",
@@ -182,6 +195,8 @@ def remote_expandvars(machine: Machine, path: str) -> str:
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True)
     return result.stdout
 
+
+_RSYNC_SSH_ACCEPT_NEW = ["-e", "ssh -o StrictHostKeyChecking=accept-new"]
 
 def rsync(source: str, destination: str, machine: Machine, check_only: bool):
     if Path(source).exists() and Path(source).is_dir():
@@ -193,25 +208,25 @@ def rsync(source: str, destination: str, machine: Machine, check_only: bool):
     cmd = machine.command(["mkdir", "-p", dst_parent], with_env_loader=False)
     subprocess.run(cmd, check=True)
 
-    password_args = ["sshpass", "-p", machine.password] if machine.password else []
-
-    is_local = machine.address == "localhost" and machine.user == ""
-    destination_ = ((f"{machine.user}@" if machine.user else "") + f"{machine.address}:" if not is_local else "") + destination
+    password_args = machine.password_args()
+    destination_with_host = machine.host_prefix() + destination
     if check_only:
-        print(f"check transfer {source} -> {destination_}")
+        print(f"check transfer {source} -> {destination_with_host}")
         result = subprocess.run([
             *password_args,
             "rsync", "-azn", "--checksum", "--itemize-changes", "--del",
-            source, destination_,
+            *_RSYNC_SSH_ACCEPT_NEW,
+            source, destination_with_host,
         ], check=True)
         if bool(result.stdout):
-            raise ValueError(f"resource need to be transferred: {source} -> {destination_}")
+            raise ValueError(f"resource need to be transferred: {source} -> {destination_with_host}")
     else:
-        print(f"transfer {source} -> {destination_}")
+        print(f"transfer {source} -> {destination_with_host}")
         subprocess.run([
             *password_args,
             "rsync", "-avz", "--checksum",
-            source, destination_,
+            *_RSYNC_SSH_ACCEPT_NEW,
+            source, destination_with_host,
         ], check=True)
 
 @dataclasses.dataclass(frozen=True)
@@ -289,27 +304,28 @@ def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
     cmd = machine.command(["mkdir", "-p", str(remote_tmp_dir)], with_env_loader=False)
     subprocess.run(cmd, check=True)
 
-    password_args = ["sshpass", "-p", machine.password] if machine.password else []
-    is_local = machine.address == "localhost" and machine.user == ""
-    destination_ = ((f"{machine.user}@" if machine.user else "") + f"{machine.address}:" if not is_local else "") + str(destination)
+    password_args = machine.password_args()
+    destination_with_host = machine.host_prefix() + str(destination)
 
     try:
-        print(f"transfer {source} -> {destination_}")
+        print(f"transfer {source} -> {destination_with_host}")
         subprocess.run([
             *password_args,
             "rsync", "-avz", "--checksum",
-            str(source) + suf, destination_ + suf,
+            *_RSYNC_SSH_ACCEPT_NEW,
+            str(source) + suf, destination_with_host + suf,
         ], check=True)
 
         try:
             yield destination
 
         finally:
-            print(f"transfer {destination_} -> {source}")
+            print(f"transfer {destination_with_host} -> {source}")
             subprocess.run([
                 *password_args,
                 "rsync", "-avz", "--checksum",
-                destination_ + suf, str(source) + suf,
+                *_RSYNC_SSH_ACCEPT_NEW,
+                destination_with_host + suf, str(source) + suf,
             ], check=True)
 
     finally:
@@ -428,7 +444,49 @@ def run_remote_task(task_link: str):
         exit(ret)
 
 
-__all__ = ["sync"]
+def _get_machines_from_launch(launch_file: Path) -> Dict[str, Machine]:
+    import xml.etree.ElementTree as ET
+    root = ET.parse(launch_file).getroot()
+    if root.tag != "launch":
+        raise ValueError("Root tag is not <launch>")
+
+    machines: Dict[str, Machine] = {}
+    for m in root.findall("machine"):
+        machines[m.get("name", "")] = Machine(
+            user=m.get("user", ""),
+            password=m.get("password", ""),
+            address=m.get("address", ""),
+            env_loader=tuple(shlex.split(m.get("env-loader", ""))),
+        )
+    return machines
+
+def sync_latest_logs(launch_file: str):
+    machines = _get_machines_from_launch(Path(launch_file))
+
+    local_log_dir = remote_expandvars(machines["local"], "${ROS_LOG_DIR}")
+    local_log_dir = (Path(local_log_dir) / "latest").resolve()
+    local_log_dir.mkdir(exist_ok=True)
+    
+    for machine_name, machine in machines.items():
+        if machine_name == "local":
+            continue
+        remote_log_dir = remote_expandvars(machine, "${ROS_LOG_DIR}")
+        remote_log_dir += "/" + local_log_dir.name
+
+        password_args = machine.password_args()
+        remote_log_dir_with_host = machine.host_prefix() + remote_log_dir
+
+        print(f"transfer {remote_log_dir_with_host}/ -> {local_log_dir}/{machine_name}/")
+        r = subprocess.run([
+            *password_args,
+            "rsync", "-avz", "--ignore-missing-args",
+            *_RSYNC_SSH_ACCEPT_NEW,
+            remote_log_dir_with_host + "/", str(local_log_dir / machine_name) + "/",
+        ])
+        if r.returncode not in (0, 24):   # 24 = files vanished during transfer, harmless
+            raise subprocess.CalledProcessError(r.returncode, r.args)
+
+__all__ = ["sync", "run_remote_task", "sync_latest_logs"]
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
