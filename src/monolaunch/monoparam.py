@@ -555,12 +555,13 @@ class SchemaFieldAccessWarning(AccessWarning):
         return f"fail to get schema of field {repr(self.key)} from {_link_to_str(self.link)}"
 
 class FieldValueOverwriteWarning(AccessWarning):
-    def __init__(self, link: PathWithJPointer, value: str):
+    def __init__(self, link: PathWithJPointer, old_value: str, new_value: str):
         self.link = link
-        self.value = value
+        self.old_value = old_value
+        self.new_value = new_value
     
     def __str__(self):
-        return f"overwrite value at {_link_to_str(self.link)} to {self.value}"
+        return f"overwrite value at {_link_to_str(self.link)}: {self.old_value} -> {self.new_value}"
 
 class SchemaWarning(Warning):
     pass
@@ -1684,15 +1685,15 @@ class SourceLoader:
         source = node.sources[-1]
         if isinstance(key, str):
             if not isinstance(source.data, dict):
-                if source.data is not None or typ != "map":
-                    warnings.warn(FieldValueOverwriteWarning(node.link.append(key), "map"))
+                if source.data is not None or typ not in ("map", "null"):
+                    warnings.warn(FieldValueOverwriteWarning(node.link.append(key), typ, "map"))
                 source.data = {}
             if key not in source.data:
                 source.data[key] = None
         else:
             if not isinstance(source.data, list):
-                if source.data is not None or typ != "seq":
-                    warnings.warn(FieldValueOverwriteWarning(node.link.append(key), "seq"))
+                if source.data is not None or typ not in ("seq", "null"):
+                    warnings.warn(FieldValueOverwriteWarning(node.link.append(key), typ, "seq"))
                 source.data = []
             if key not in range(len(source.data)):
                 source.data.extend([None]*(1 + key - len(source.data)))
@@ -1755,7 +1756,7 @@ class SourceLoader:
         source = subnode.sources[-1]
         typ = subnode.access()[0]
         if typ not in ("scalar", "null"):
-            warnings.warn(FieldValueOverwriteWarning(subnode.link, "scalar"))
+            warnings.warn(FieldValueOverwriteWarning(subnode.link, typ, "scalar"))
         source.data = value_
 
     @raises(FormatErrorGroup, TypeError,
