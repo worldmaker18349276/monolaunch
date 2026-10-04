@@ -827,7 +827,8 @@ SchemaAccessType = Union[
     Tuple[Literal["any"],     None],
     Tuple[Literal["struct"],  Dict[str, "SchemaSource"]],
     Tuple[Literal["dict"],    "SchemaSource"],
-    Tuple[Literal["array"],   "SchemaSource"],
+    Tuple[Literal["array"],   Tuple[int, "SchemaSource"]],
+    Tuple[Literal["list"],    "SchemaSource"],
     Tuple[Literal["null"],    Type[None]],
     Tuple[Literal["scalar"],  Union[Type[bool], Type[int], Type[float], Type[str]]],
     Tuple[Literal["enum"],    List[JSONScalar]],
@@ -851,6 +852,12 @@ class SchemaSource:
               | {                             // array
                   "type": "array",
                   "items": <schema>
+                }
+              | {                             // fixed-length array
+                  "type": "array",
+                  "items": <schema>,
+                  "minItems": <length>,
+                  "maxItems": <length>,
                 }
               | { "type": "null" }            // null
               | {                             // scalar
@@ -957,8 +964,14 @@ class SchemaSource:
             ):
                 return "dict", SchemaSource(self.link.append("additionalProperties"), additionalProperties)
 
-            if node_type == "array" and "items" in self.data:
-                return "array", SchemaSource(self.link.append("items"), self.data["items"])
+            if node_type == "array" and "items" in self.data and "minItems" not in self.data and "maxItems" not in self.data:
+                return "list", SchemaSource(self.link.append("items"), self.data["items"])
+
+            if (node_type == "array"
+                and "items" in self.data
+                and isinstance(N := self.data.get("minItems", 0), int)
+                and N == self.data.get("maxItems", float("inf"))):
+                return "array", (N, SchemaSource(self.link.append("items"), self.data["items"]))
 
             if node_type == "null":
                 return "null", type(None)
@@ -990,9 +1003,13 @@ class SchemaSource:
             if isinstance(key, str):
                 return type_value[1]
 
-        elif type_value[0] == "array":
+        elif type_value[0] == "list":
             if isinstance(key, int):
                 return type_value[1]
+
+        elif type_value[0] == "array":
+            if isinstance(key, int):
+                return type_value[1][1]
 
         return None
 
@@ -1003,8 +1020,10 @@ class SchemaSource:
             return "null", None, []
         elif schema_type_value[0] == "null":
             return "null", None, []
-        elif schema_type_value[0] == "array":
+        elif schema_type_value[0] == "list":
             return "seq", range(0), []
+        elif schema_type_value[0] == "array":
+            return "seq", range(schema_type_value[1][0]), []
         elif schema_type_value[0] == "dict":
             return "map", [], []
         elif schema_type_value[0] == "struct":
@@ -1270,7 +1289,10 @@ class SourcedNode:
 
             if schema_type_value[0] == "any":
                 return type_, range(length), sources
+            elif schema_type_value[0] == "list":
+                return type_, range(length), sources
             elif schema_type_value[0] == "array":
+                length = max(length, schema_type_value[1][0])
                 return type_, range(length), sources
             else:
                 warnings.warn(SchemaTypeMismatchWarning(self.link, type_, schema.link, schema_type_value[0]))
@@ -1280,7 +1302,7 @@ class SourcedNode:
             assert False
 
     @raises(SchemaUnknownTypeWarning)
-    def schema_type(self) -> Literal["any", "struct", "dict", "array", "null", "scalar", "enum"]:
+    def schema_type(self) -> Literal["any", "struct", "dict", "list", "array", "null", "scalar", "enum"]:
         return self.schema.access()[0] if self.schema is not None else "any"
 
 @dataclass
