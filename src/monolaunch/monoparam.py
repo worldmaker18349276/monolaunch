@@ -595,15 +595,6 @@ class IncompatibleMergeWarning(ResolveWarning):
             str(_link_to_str(self.right_src_link)), self.right_type,
         )
 
-class SchemaDefaultTypeMismatchWarning(ResolveWarning):
-    def __init__(self, link: PathWithJPointer, default: JSON, expected_type: str):
-        self.link = link
-        self.default = default
-        self.expected_type = expected_type
-    
-    def __str__(self):
-        return f"schema default value at {self.link} ({self.default}) doesn't match its type {self.expected_type}"
-
 class SyncResourceWarning(Warning):
     pass
 
@@ -800,6 +791,13 @@ class SchemaMetadata:
 
     @raises(SchemaMetadataParseWarning)
     @staticmethod
+    def parse_default(node: SchemaJSON) -> Optional[JSON]:
+        if not isinstance(node, dict):
+            node = {}
+        return SchemaMetadata._SchemaJSON_checked_get_JSON(node, "default")
+
+    @raises(SchemaMetadataParseWarning)
+    @staticmethod
     def parse(node: SchemaJSON) -> "SchemaMetadata":
         if not isinstance(node, dict):
             node = {}
@@ -915,6 +913,13 @@ class SchemaSource:
 
         return True
 
+    @raises(SchemaMetadataParseWarning)
+    def get_default(self) -> Optional["Source"]:
+        default_value = SchemaMetadata.parse_default(self.data)
+        if default_value is None:
+            return None
+        return Source(self.link.append("default"), self.data, "default", ())
+
     def get_inner(self) -> Optional["SchemaSource"]:
         if isinstance(self.data, dict) and isinstance(anyOf := self.data.get("anyOf", []), list) and len(anyOf) == 1:
             return SchemaSource(self.link.append("anyOf").append(0), anyOf[0])
@@ -1013,7 +1018,7 @@ class SchemaSource:
 
         return None
 
-    @raises(SchemaUnknownTypeWarning, SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning)
+    @raises(SchemaUnknownTypeWarning)
     @prerequisite(is_direct)
     def access_default(self, schema_type_value: SchemaAccessType) -> AccessType:
         if schema_type_value[0] == "any":
@@ -1028,25 +1033,10 @@ class SchemaSource:
             return "map", [], []
         elif schema_type_value[0] == "struct":
             return "map", list(schema_type_value[1].keys()), []
-
-        metadata = SchemaMetadata.parse(self.data)
-        if schema_type_value[0] == "scalar":
-            if metadata.default is None:
-                return "scalar", schema_type_value[1](), []
-            elif type(metadata.default) != schema_type_value[1]:
-                warnings.warn(SchemaDefaultTypeMismatchWarning(self.link, metadata.default, schema_type_value[1].__name__))
-                return "scalar", schema_type_value[1](), []
-            else:
-                return "scalar", cast(JSONScalar, metadata.default), []
+        elif schema_type_value[0] == "scalar":
+            return "scalar", schema_type_value[1](), []
         elif schema_type_value[0] == "enum":
-            if metadata.default is None:
-                return "scalar", schema_type_value[1][0], []
-            elif metadata.default not in schema_type_value[1]:
-                enum_str = " | ".join(repr(e) for e in schema_type_value[1])
-                warnings.warn(SchemaDefaultTypeMismatchWarning(self.link, metadata.default, enum_str))
-                return "scalar", schema_type_value[1][0], []
-            else:
-                return "scalar", metadata.default, []
+            return "scalar", schema_type_value[1][0], []
         else:
             assert False
 
@@ -1084,7 +1074,7 @@ class Source:
     that is, field path may contain index of list to be merged.
     """
     link: PathWithJPointer
-    parent: Union[SourcedJSON, Dict[Path, Union[SourcedJSON, ABSENCE]]]
+    parent: Union[SourcedJSON, SchemaJSON, Dict[Path, Union[SourcedJSON, ABSENCE]]]
     key: Union[int, str, Path]
     context: Tuple[Tuple[str, str], ...]
 
@@ -1102,6 +1092,10 @@ class Source:
 
     def is_direct(self) -> bool:
         return not isinstance(self.data, Merge) and not isinstance(self.data, Include)
+
+    @staticmethod
+    def is_null(sources: List["Source"]) -> bool:
+        return all(source.data is None for source in sources)
 
     @raises(IncompatibleMergeWarning)
     @staticmethod
@@ -1195,6 +1189,7 @@ class SourcedNode:
     link: PathWithJPointer
     sources: List[Source]
     schema: Optional[SchemaSource] = None
+    default: Optional[Source] = None
 
     def is_direct(self) -> bool:
         return all(source.is_direct() for source in self.sources) and (self.schema is None or self.schema.is_direct())
@@ -1210,14 +1205,22 @@ class SourcedNode:
             print("# $id: " + str(source.link), file=stream)
             yaml.dump(source.data, stream, Dumper=SourcedYAMLDumper, sort_keys=False)
 
-    @raises(IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning)
+    def is_default(self) -> bool:
+        return Source.is_null(self.sources) and self.default is not None
+
+    @raises(IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning)
     @prerequisite(is_direct)
     def access(self) -> AccessType:
         assert self.is_direct()
         
         schema = self.schema or SchemaSource.any()
         type_, sources = Source.access(self.sources)
+        sources_ = list(sources)
+        
+        if type_ == "null" and self.default is not None:
+            type_, _default = Source.access([self.default])
+            sources = []
+            sources_ = [self.default]
 
         if type_ == "null":
             schema_type_value = schema.access()
@@ -1230,10 +1233,10 @@ class SourcedNode:
                 return schema.access_default(schema_type_value)
 
         elif type_ == "scalar":
-            data = sources[-1].data
+            data = sources_[-1].data
             assert isinstance(data, (bool, int, float, str, Resource))
             if isinstance(data, Resource):
-                data = sources[-1].resolve_resource(data)
+                data = sources_[-1].resolve_resource(data)
 
             schema_type_value = schema.access()
 
@@ -1256,7 +1259,7 @@ class SourcedNode:
 
         elif type_ == "map":
             keys: List[str] = []
-            for source in sources:
+            for source in sources_:
                 data = source.data
                 assert isinstance(data, dict)
                 for key in data.keys():
@@ -1280,7 +1283,7 @@ class SourcedNode:
         elif type_ == "seq":
             # zip longest
             length = 0
-            for source in sources:
+            for source in sources_:
                 data = source.data
                 assert isinstance(data, list)
                 length = max(length, len(data))
@@ -1377,11 +1380,14 @@ class SourceLoader:
         self.all_schema[filepath] = schema
         return SchemaSource(PathWithJPointer(filepath), schema)
 
-    @raises(SchemaLoadError, SchemaRefLoopError, SchemaRefFieldAccessError)
-    def _resolve_indirect_schema(self, schema: SchemaSource) -> Tuple[SchemaSource, Set[Path]]:
+    @raises(SchemaLoadError, SchemaRefLoopError, SchemaRefFieldAccessError, SchemaMetadataParseWarning)
+    def _resolve_indirect_schema(self, schema: SchemaSource) -> Tuple[SchemaSource, Optional[Source], Set[Path]]:
         depends: Set[Path] = set()
         visited: Set[PathWithJPointer] = set()
+        default: Optional[Source] = None
         while True:
+            if default is None:
+                default = schema.get_default()
             inner = schema.get_inner()
             if inner is not None:
                 schema = inner
@@ -1406,7 +1412,7 @@ class SourceLoader:
             
             break
 
-        return schema, depends
+        return schema, default, depends
 
     @raises(FormatErrorGroup)
     # SourceLoadError, SourceRefLoopError, SourceIncludeFieldAccessError
@@ -1467,12 +1473,13 @@ class SourceLoader:
 
         return outputs, depends
 
-    @raises(FormatErrorGroup)
+    @raises(FormatErrorGroup, SchemaMetadataParseWarning)
     # SchemaLoadError, SchemaRefLoopError, SchemaRefFieldAccessError,
     # SourceLoadError, SourceRefLoopError, SourceIncludeFieldAccessError
     def resolve_indirect_(self, node: SourcedNode) -> Tuple[SourcedNode, Set[Path]]:
         depends: Set[Path] = set()
         sources: List[Source] = []
+        default = node.default
         error = FormatErrorGroup([])
         for source in node.sources:
             with error.collect():
@@ -1483,17 +1490,20 @@ class SourceLoader:
         schema = None
         if node.schema is not None:
             with error.collect():
-                schema, depends_ = self._resolve_indirect_schema(node.schema)
+                schema, default_, depends_ = self._resolve_indirect_schema(node.schema)
+                if default is None:
+                    default = default_
                 depends.update(depends_)
         
         if error.errors:
             raise error
-        node = SourcedNode(node.link, sources, schema)
+        assert default is None or default.is_direct()
+        node = SourcedNode(node.link, sources, schema, default)
         assert node.is_direct()
         return node, depends
 
     @raises(FieldAccessWarning, SchemaFieldAccessWarning)
-    def _get(self, node: SourcedNode, type_keys: AccessType, key: Union[str, int], is_untyped_key: bool = True) -> Optional[SourcedNode]:
+    def _get(self, node: SourcedNode, type_keys: AccessType, is_default: bool, key: Union[str, int], is_untyped_key: bool = True) -> Optional[SourcedNode]:
         # assert node.is_direct()
 
         if type_keys[0] == "map":
@@ -1529,12 +1539,17 @@ class SourceLoader:
                 warnings.warn(SchemaFieldAccessWarning(node.schema.link, key_))
         else:
             schema = None
-        node = SourcedNode(node.link.append(key_), sources, schema)
+
+        default = None
+        if is_default:
+            assert node.default is not None
+            default = Source(node.default.link.append(key_), node.default.data, key_, ())
+        node = SourcedNode(node.link.append(key_), sources, schema, default)
         return node
 
     @raises(FormatErrorGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning)
     def walk_(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath]) -> Tuple[Optional[SourcedNode], Set[Path]]:
         depends: Set[Path] = set()
@@ -1545,7 +1560,8 @@ class SourceLoader:
             depends.update(depends_)
 
             type_keys = node.access()
-            node_ = self._get(node, type_keys, key, is_untyped_key)
+            is_default = node.is_default()
+            node_ = self._get(node, type_keys, is_default, key, is_untyped_key)
             if node_ is None:
                 return None, depends
             node = node_
@@ -1554,7 +1570,7 @@ class SourceLoader:
 
     @raises(FormatErrorGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning)
     def walk(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath]) -> Optional[SourcedNode]:
         return self.walk_(node, fieldpath)[0]
@@ -1563,9 +1579,9 @@ class SourceLoader:
     def load(self, src: Path) -> SourcedNode:
         src = src.resolve()
         source = self._load_source(src, ())
-        return SourcedNode(PathWithJPointer(src), [source], None)
+        return SourcedNode(PathWithJPointer(src), [source], None, None)
 
-    @raises(SchemaLoadError, SchemaRefFieldAccessError)
+    @raises(SchemaLoadError, SchemaRefFieldAccessError, SchemaMetadataParseWarning)
     def with_schema(self, node: SourcedNode, schema_src: PathWithJPointer) -> SourcedNode:
         schema_src = schema_src.resolve()
         schema = self._load_schema(schema_src.filepath)
@@ -1574,25 +1590,27 @@ class SourceLoader:
         except FieldAccessError as err:
             raise SchemaRefFieldAccessError(schema.link.extend(err.path)) from err
         schema = SchemaSource(schema.link.extend(schema_src.fieldpath), schema_data)
-        return SourcedNode(node.link, list(node.sources), schema)
+        default = schema.get_default()
+        return SourcedNode(node.link, list(node.sources), schema, default)
 
     @raises(FileAlreadyLoadedError)
     def new(self, src: Optional[Path], data: JSON = None) -> SourcedNode:
         if src is not None:
             src = src.resolve()
         source = self._new_source(src, data)
-        return SourcedNode(PathWithJPointer(source.link.filepath), [source], None)
+        return SourcedNode(PathWithJPointer(source.link.filepath), [source], None, None)
 
-    @raises(FileAlreadyLoadedError)
+    @raises(FileAlreadyLoadedError, SchemaMetadataParseWarning)
     def with_new_schema(self, node: SourcedNode, schema_src: Optional[Path], schema: SchemaJSON) -> SourcedNode:
         if schema_src is not None:
             schema_src = schema_src.resolve()
         schema_source = self._new_schema(schema_src, schema)
-        return SourcedNode(node.link, list(node.sources), schema_source)
+        default = schema_source.get_default()
+        return SourcedNode(node.link, list(node.sources), schema_source, default)
 
     @raises(FormatErrorGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning)
     def resolve_all_(self, node: SourcedNode, sync_resources: Optional[List[SyncInfo]] = None) -> Tuple[JSON, Set[Path]]:
@@ -1611,11 +1629,12 @@ class SourceLoader:
             node, set_value = stack.pop()
 
             type_keys = node.access()
+            is_default = node.is_default()
             if type_keys[0] == "map":
                 res_: JSON = {}
                 for key_ in reversed(type_keys[1]):
                     with error.collect():
-                        subnode = self._get(node, type_keys, key_)
+                        subnode = self._get(node, type_keys, is_default, key_)
                         assert subnode is not None
                         subnode, depends_ = self.resolve_indirect_(subnode)
                         depends.update(depends_)
@@ -1626,7 +1645,7 @@ class SourceLoader:
                 res_: JSON = []
                 for key_ in reversed(type_keys[1]):
                     with error.collect():
-                        subnode = self._get(node, type_keys, str(key_))
+                        subnode = self._get(node, type_keys, is_default, str(key_))
                         assert subnode is not None
                         subnode, depends_ = self.resolve_indirect_(subnode)
                         depends.update(depends_)
@@ -1649,7 +1668,7 @@ class SourceLoader:
 
     @raises(FormatErrorGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning)
     def resolve_all(self, node: SourcedNode, sync_resources: Optional[List[SyncInfo]] = None) -> JSON:
@@ -1657,7 +1676,7 @@ class SourceLoader:
 
     @raises(SourceLoadError, FormatErrorGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning)
     def load_resolve_all(self, link: PathWithJPointer) -> JSON:
@@ -1726,7 +1745,7 @@ class SourceLoader:
 
     @raises(FormatErrorGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             FieldValueOverwriteWarning)
     def _ensure_walk(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], ensure_null: bool) -> SourcedNode:
@@ -1744,7 +1763,8 @@ class SourceLoader:
             self._ensure_get(node, typ, key_)
 
             type_keys = node.access()
-            node_ = self._get(node, type_keys, key)
+            is_default = node.is_default()
+            node_ = self._get(node, type_keys, is_default, key)
             assert node_ is not None
             node = node_
 
@@ -1756,7 +1776,6 @@ class SourceLoader:
 
     @raises(FormatErrorGroup, TypeError,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             FieldValueOverwriteWarning)
     def update(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], value: Union[JSONScalar, Path], machine: str = ""):
@@ -1787,7 +1806,7 @@ class SourceLoader:
 
     @raises(FormatErrorGroup, TypeError,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             FieldValueOverwriteWarning)
     def include(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], value: Union[str, Path, PathWithJPointer], machine: str = ""):
@@ -1811,7 +1830,7 @@ class SourceLoader:
 
 @raises(FormatErrorGroup,
         IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-        SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+        SchemaMetadataParseWarning,
         FieldAccessWarning, SchemaFieldAccessWarning,
         ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning)
 def resolve_YAML(link: PathWithJPointer) -> JSON:
@@ -1855,7 +1874,7 @@ class YAMLWatcher:
 
     @raises(FormatWarningGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning)
@@ -2033,7 +2052,7 @@ class YAMLSynchronizer:
 
     @raises(FormatWarningGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning)
@@ -2049,7 +2068,7 @@ class YAMLSynchronizer:
 
     @raises(FormatWarningGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning, SyncFileNotReadyWarning)
@@ -2078,7 +2097,7 @@ class YAMLSynchronizer:
 
     @raises(FormatWarningGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning, SyncFileNotReadyWarning)
@@ -2154,7 +2173,7 @@ class YAMLSynchronizer:
 
     @raises(FormatWarningGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning, SyncFileNotReadyWarning)
@@ -2170,7 +2189,7 @@ class YAMLSynchronizer:
 
     @raises(FormatWarningGroup,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-            SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+            SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning, SyncFileNotReadyWarning)
@@ -2256,7 +2275,7 @@ def parse_jpointer_or_xpointer(path: Union[str, Path, PathWithJPointer, PathWith
 
 @raises(FormatWarningGroup,
         IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
-        SchemaMetadataParseWarning, SchemaDefaultTypeMismatchWarning,
+        SchemaMetadataParseWarning,
         FieldAccessWarning, SchemaFieldAccessWarning,
         ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
         RootIsNotMapWarning, SyncFileNotReadyWarning)
