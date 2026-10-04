@@ -420,7 +420,6 @@ def set_strict():
     """
     raise errors for failures of parameter loading/resolving/typechecking instead of warnings.
     """
-    warnings.filterwarnings("error", category=monoparam.FormatWarning)
     warnings.filterwarnings("error", category=monoparam.ResolveWarning)
     warnings.filterwarnings("error", category=monoparam.SchemaWarning)
 
@@ -1092,11 +1091,11 @@ def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
     sys.argv[1:] = unknown
 
     with warnings.catch_warnings():
-        def showwarning(message: str, category: Type[Warning], filename: Any, lineno: Any, file:Any=None, line:Any=None):
+        def showwarning(message: Warning, category: Type[Warning], filename: Any, lineno: Any, file:Any=None, line:Any=None):
             if not verbose:
-                print(f"{category.__name__}: {message}", file=sys.stderr)
+                print(f"[{category.__name__}] " + str(message).split("\n")[0], file=sys.stderr)
             else:
-                print(f"{filename}:{lineno}: {category.__name__}: {message}", file=sys.stderr)
+                print(f"[{category.__name__}] {str(message)}", file=sys.stderr)
                 traceback.print_stack()
         warnings.showwarning = showwarning
     
