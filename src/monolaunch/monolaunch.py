@@ -952,12 +952,10 @@ AUTO_RELAUNCH_WITH_ROSCORE_EXPR = """
 )
 """
 
-def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
+def generate(launch_func: Callable[[], None], launch_filepath: Path, need_regen: bool = True) -> Path:
     with _with_ctx():
         ctx().need_regen = need_regen
-        cwd = Path.cwd()
-        name = launch_func.__name__
-        ctx().params_filepath = cwd / f"{name}.yaml"
+        ctx().params_filepath = launch_filepath.parent / f"{launch_filepath.stem}.yaml"
 
         try:
             launch_func()
@@ -1046,7 +1044,6 @@ def generate(launch_func: Callable[[], None], need_regen: bool = True) -> Path:
         launch_str = _indent_attrib(launch_str)
 
         # save launch file
-        launch_filepath = cwd / f"{name}.launch"
         launch_filepath.write_text(launch_str)
 
         return launch_filepath
@@ -1062,33 +1059,34 @@ def run(launch_func: Callable[[], None]) -> Any:
 def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
     argparser = argparse.ArgumentParser(
         add_help=False,
-        usage="%(prog)s [--gen-verbose] [--sync-latest-logs] [--dry-run STAGE] [ARGS ...]",
+        usage="%(prog)s [--gen-verbose] [--dry-run STAGE] [ARGS ...]",
     )
     argparser.add_argument(
         "--dry-run",
         type=int, choices=range(4), default=0,
-        help="0: just run, 1: until generating launch file, 2: until resolving yaml file, 3: until syncing resources"
+        help="0: just run, 1: until generating launch file, 2: until resolving yaml file, 3: until syncing resources, -1: sync latest logs"
     )
     argparser.add_argument(
         "--gen-verbose",
         action="store_true",
         help="increase output verbosity during generation phase"
     )
-    argparser.add_argument(
-        "--sync-latest-logs",
-        action="store_true",
-        help="synchronize latest logs from remote machines instead of launching them"
-    )
     if "-h" in sys.argv or "--help" in sys.argv:
         argparser.print_help()
     args, unknown = argparser.parse_known_args()
     dry_run = int(args.dry_run)
     verbose = bool(args.gen_verbose)
-    sync_latest_logs = bool(args.sync_latest_logs)
     need_regen = not bool(os.environ.get("NO_REGEN_WITH_LOCAL_ENV_LOADER", ""))
     os.environ["NO_REGEN_WITH_LOCAL_ENV_LOADER"] = "1"
-    cmd = [sys.executable, *sys.argv]
+    cmd = (sys.executable, *sys.argv)
     sys.argv[1:] = unknown
+
+    launch_filepath = Path.cwd() / f"{launch_func.__name__}.launch"
+
+    if dry_run == -1:
+        cmd = ("rosrun", "monolaunch", "sync_latest_logs.py", str(launch_filepath))
+        print("synchronize latest logs because --dry-run=-1:\n" + shlex.join(cmd))
+        return lambda: os.execvp(cmd[0], cmd)
 
     with warnings.catch_warnings():
         def showwarning(message: Warning, category: Type[Warning], filename: Any, lineno: Any, file:Any=None, line:Any=None):
@@ -1100,7 +1098,7 @@ def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
         warnings.showwarning = showwarning
     
         try:
-            launch_filepath = generate(launch_func=launch_func, need_regen=need_regen)
+            launch_filepath = generate(launch_func=launch_func, launch_filepath=launch_filepath, need_regen=need_regen)
         except Exception:
             traceback.print_exc()
             return lambda: exit(1)
@@ -1115,10 +1113,6 @@ def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
             return lambda: exit(0)
         if dry_run > 0:
             cmd = (*cmd, f"dry_run:={dry_run}")
-        if sync_latest_logs:
-            cmd = ("rosrun", "monolaunch", "sync_latest_logs.py", str(launch_filepath))
-            print("synchronize latest logs:\n" + shlex.join(cmd))
-            return lambda: os.execvp(cmd[0], cmd)
         print("start launch:\n" + shlex.join(cmd))
         return lambda: os.execvp(cmd[0], cmd)
 
