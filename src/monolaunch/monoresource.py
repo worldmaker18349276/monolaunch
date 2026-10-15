@@ -5,15 +5,19 @@ it uses commands: ssh, sshpass, rsync
 """
 import contextlib
 from inspect import cleandoc
+import functools
 import os
 import signal
 import sys
 import re
 import shlex
+import shutil
 import subprocess
 import dataclasses
 from pathlib import Path
 import socket
+import json
+import tempfile
 
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, cast
 import urllib.parse
@@ -30,6 +34,51 @@ def get_local_addresses() -> List[str]:
 def getuser() -> str:
     import getpass
     return getpass.getuser()
+
+@functools.lru_cache(maxsize=None)
+def _is_local(address: str, user: str) -> bool:
+    # see: https://github.com/ros/ros_comm/blob/noetic-devel/tools/roslaunch/src/roslaunch/core.py#L86
+    try:
+        # If Python has ipv6 disabled but machine.address can be resolved somehow to an ipv6 address, then host[4][0] will be int
+        machine_ips = [host[4][0] for host in socket.getaddrinfo(address, 0, 0, 0, socket.SOL_TCP) if isinstance(host[4][0], str)]
+    except socket.gaierror:
+        raise ValueError(f"cannot resolve host address for machine [{address}]")
+    local_addresses = ['localhost'] + get_local_addresses()
+    # check 127/8 and local addresses
+    is_local = any(ip.startswith('127.') or ip == '::1' for ip in machine_ips)
+    is_local = is_local or bool(set(machine_ips) & set(local_addresses))
+
+    #491: override local to be ssh if machine.user != local user
+    if is_local and user:
+        is_local = user == getuser()
+    return is_local
+
+_ssh_control_dir: Optional[str] = None
+
+def _ssh_mux_opts() -> List[str]:
+    if _ssh_control_dir is None:
+        return []
+    return [
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPersist=60",
+        "-o", f"ControlPath={_ssh_control_dir}/%C",  # %C is a short hash: avoids the unix socket path length limit
+    ]
+
+@contextlib.contextmanager
+def ssh_multiplexing() -> Generator[None, None, None]:
+    """share one ssh connection per host between all ssh/rsync calls inside this block"""
+    global _ssh_control_dir
+    _ssh_control_dir = tempfile.mkdtemp(prefix="mlssh-")
+    try:
+        yield
+    finally:
+        for sock in Path(_ssh_control_dir).iterdir():
+            subprocess.run(
+                ["ssh", "-O", "exit", "-o", f"ControlPath={sock}", "placeholder"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        shutil.rmtree(_ssh_control_dir, ignore_errors=True)
+        _ssh_control_dir = None
 
 
 class SchemeParseError(Exception):
@@ -130,21 +179,7 @@ class Machine:
         return urllib.parse.urlunparse(("machine", self.get_netloc(), path, "", args, ""))
 
     def is_local(self):
-        # see: https://github.com/ros/ros_comm/blob/noetic-devel/tools/roslaunch/src/roslaunch/core.py#L86
-        try:
-            # If Python has ipv6 disabled but machine.address can be resolved somehow to an ipv6 address, then host[4][0] will be int
-            machine_ips = [host[4][0] for host in socket.getaddrinfo(self.address, 0, 0, 0, socket.SOL_TCP) if isinstance(host[4][0], str)]
-        except socket.gaierror:
-            raise ValueError(f"cannot resolve host address for machine [{self.address}]")
-        local_addresses = ['localhost'] + get_local_addresses()
-        # check 127/8 and local addresses
-        is_local = ([ip for ip in machine_ips if (ip.startswith('127.') or ip == '::1')] != [])
-        is_local = is_local or (set(machine_ips) & set(local_addresses) != set())
-
-        #491: override local to be ssh if machine.user != local user
-        if is_local and self.user:
-            is_local = self.user == getuser()
-        return is_local
+        return _is_local(self.address, self.user)
 
     def password_args(self) -> List[str]:
         return ["sshpass", "-p", self.password] if self.password else []
@@ -164,7 +199,7 @@ class Machine:
         password_args = self.password_args()
         accept_new_args = ["-o", "StrictHostKeyChecking=accept-new"] if accept_new else []
         tt_args = ["-tt"] if tt else []
-        remote_args = ["ssh", *accept_new_args, *tt_args, f"{self.user}@{self.address}" if self.user else self.address]
+        remote_args = ["ssh", *accept_new_args, *_ssh_mux_opts(), *tt_args, f"{self.user}@{self.address}" if self.user else self.address]
 
         return (*password_args, *remote_args, shlex.join(remote_cmd))
 
@@ -177,55 +212,69 @@ def expandvars(path: str) -> str:
     import re
     return re.compile(r'\$\{([^}]+)\}').sub(lambda m: os.environ[m.group(1)], path)
 
-# TODO: too slow!
+_REMOTE_EXPAND_SCRIPT = r'''
+import os, re, sys, json
+os.environ['DOLLARSIGN'] = '$'
+os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))
+os.environ['ROS_LOG_DIR'] = os.environ.get('ROS_LOG_DIR', os.path.expandvars('$ROS_HOME/log'))
+pat = re.compile(r'\$\{([^}]+)\}')
+paths = json.load(sys.stdin)
+print(json.dumps([pat.sub(lambda m: os.environ[m.group(1)], p) for p in paths]))
+'''
+
+def remote_expandvars_many(machine: Machine, paths: Sequence[str]) -> List[str]:
+    """expand ${VAR} in all paths using a single remote invocation"""
+    if not paths:
+        return []
+    if machine.is_local() and not machine.env_loader:
+        return [expandvars(p) for p in paths]  # no subprocess needed
+
+    cmd = machine.command(["python3", "-c", _REMOTE_EXPAND_SCRIPT])
+    result = subprocess.run(cmd, input=json.dumps(list(paths)), stdout=subprocess.PIPE, text=True, check=True)
+    # last line only, in case the env loader / login shell prints noise
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
 def remote_expandvars(machine: Machine, path: str) -> str:
-    cmd = machine.command([
-        "python3", "-c",
-        "; ".join([
-            "import os",
-            "os.environ['DOLLARSIGN'] = '$'",
-            "os.environ['ROS_HOME'] = os.environ.get('ROS_HOME', os.path.expandvars('$HOME/.ros'))",
-            "os.environ['ROS_LOG_DIR'] = os.environ.get('ROS_LOG_DIR', os.path.expandvars('$ROS_HOME/log'))",
-            "import re",
-            f"path = {str(path)!r}",
-            r"print(re.compile(r'\$\{([^}]+)\}').sub(lambda m: os.environ[m.group(1)], path), end='')",
-        ])
-    ])
+    return remote_expandvars_many(machine, [path])[0]
 
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=True)
-    return result.stdout
+def _rsync_ssh_accept_new() -> List[str]:
+    return ["-e", shlex.join(["ssh", "-o", "StrictHostKeyChecking=accept-new", *_ssh_mux_opts()])]
 
-
-_RSYNC_SSH_ACCEPT_NEW = ["-e", "ssh -o StrictHostKeyChecking=accept-new"]
 
 def rsync(source: str, destination: str, machine: Machine, check_only: bool):
-    if Path(source).exists() and Path(source).is_dir():
+    if Path(source).is_dir():
         source = str(Path(source)) + "/"
 
     dst_parent = str(Path(destination).parent)
-    print(f"create parent directory {dst_parent}")
+    host_prefix = machine.host_prefix()
+    destination_with_host = host_prefix + destination
 
-    cmd = machine.command(["mkdir", "-p", dst_parent], with_env_loader=False)
-    subprocess.run(cmd, check=True)
+    extra: List[str] = _rsync_ssh_accept_new()
+    if not check_only:
+        if host_prefix:
+            # create the parent dir on the remote side as part of the rsync connection
+            extra += ["--rsync-path", f"mkdir -p {shlex.quote(dst_parent)} && rsync"]
+        else:
+            Path(dst_parent).mkdir(parents=True, exist_ok=True)
 
     password_args = machine.password_args()
-    destination_with_host = machine.host_prefix() + destination
     if check_only:
         print(f"check transfer {source} -> {destination_with_host}")
         result = subprocess.run([
             *password_args,
             "rsync", "-azn", "--checksum", "--itemize-changes", "--del",
-            *_RSYNC_SSH_ACCEPT_NEW,
+            *extra,
             source, destination_with_host,
-        ], check=True)
-        if bool(result.stdout):
+        ], stdout=subprocess.PIPE, text=True, check=True)
+        if result.stdout.strip():
+            print(result.stdout)
             raise ValueError(f"resource need to be transferred: {source} -> {destination_with_host}")
     else:
         print(f"transfer {source} -> {destination_with_host}")
         subprocess.run([
             *password_args,
             "rsync", "-avz", "--checksum",
-            *_RSYNC_SSH_ACCEPT_NEW,
+            *extra,
             source, destination_with_host,
         ], check=True)
 
@@ -283,14 +332,19 @@ def sync(params_link: str):
     ```
     """
     print(f"sync resources: {params_link}")
+    # group by machine so each machine needs only one env expansion
+    by_machine: Dict[Machine, List[SyncInfo]] = {}
     for info in SyncInfo.load_list(PathWithJPointer.parse(params_link)):
-        machine = Machine.parse(info.machine)
-        machine = machine.reduce_local()
+        machine = Machine.parse(info.machine).reduce_local()
+        by_machine.setdefault(machine, []).append(info)
 
-        expanded_source = expandvars(info.source)
-        expanded_destination = remote_expandvars(machine, info.destination)
-        print(f"rsync {expanded_source} -> {expanded_destination}")
-        rsync(expanded_source, expanded_destination, machine, info.check_only)
+    with ssh_multiplexing():
+        for machine, group in by_machine.items():
+            destinations = remote_expandvars_many(machine, [i.destination for i in group])
+            for info, expanded_destination in zip(group, destinations):
+                expanded_source = expandvars(info.source)
+                print(f"rsync {expanded_source} -> {expanded_destination}")
+                rsync(expanded_source, expanded_destination, machine, info.check_only)
 
 @contextlib.contextmanager
 def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
@@ -300,19 +354,18 @@ def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
     remote_tmp_dir = Path(f"/tmp/temp_rsync_{os.getpid()}_" + str(uuid4()).replace("-", "_"))
     destination = remote_tmp_dir / source.name
 
-    print(f"create temp directory {remote_tmp_dir}")
-    cmd = machine.command(["mkdir", "-p", str(remote_tmp_dir)], with_env_loader=False)
-    subprocess.run(cmd, check=True)
-
     password_args = machine.password_args()
     destination_with_host = machine.host_prefix() + str(destination)
+
+    extra: List[str] = _rsync_ssh_accept_new()
+    extra += ["--rsync-path", f"mkdir -p {shlex.quote(str(remote_tmp_dir))} && rsync"]
 
     try:
         print(f"transfer {source} -> {destination_with_host}")
         subprocess.run([
             *password_args,
             "rsync", "-avz", "--checksum",
-            *_RSYNC_SSH_ACCEPT_NEW,
+            *extra,
             str(source) + suf, destination_with_host + suf,
         ], check=True)
 
@@ -324,7 +377,7 @@ def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
             subprocess.run([
                 *password_args,
                 "rsync", "-avz", "--checksum",
-                *_RSYNC_SSH_ACCEPT_NEW,
+                *extra,
                 destination_with_host + suf, str(source) + suf,
             ], check=True)
 
@@ -480,7 +533,7 @@ def sync_latest_logs(launch_file: str):
         r = subprocess.run([
             *password_args,
             "rsync", "-avz", "--ignore-missing-args",
-            *_RSYNC_SSH_ACCEPT_NEW,
+            *_rsync_ssh_accept_new(),
             remote_log_dir_with_host + "/", str(local_log_dir / machine_name) + "/",
         ])
         if r.returncode not in (0, 24):   # 24 = files vanished during transfer, harmless
