@@ -1263,9 +1263,12 @@ class SourcedNode:
     def print(self, stream: Optional[IO[str]] = None):
         stream = stream if stream is not None else sys.stdout
         print("# ---", file=stream)
-        print("# !merge_all", file=stream)
+        print("# $id: " + str(self.link), file=stream)
         if self.schema is not None:
             print("# $schema: " + str(self.schema.link), file=stream)
+        if self.default is not None:
+            print("# $default: " + str(self.default.link), file=stream)
+        print("# !merge_all", file=stream)
         for source in self.sources:
             print("---", file=stream)
             print("# $id: " + str(source.link), file=stream)

@@ -118,6 +118,8 @@ the basic structure is the same, almost every tag has a corresponding function:
 | `with node(name, pkg, type, ...)`     | `<node>`.                                                              |
 | `with include(file, **args)`          | `<include>`, can contain env, remap, param.                            |
 |                                       | file is an absolute path to the launch file to run.                    |
+|                                       | note that some behaviors are inconsitent to node due to limitation,    |
+|                                       | it's recommended to convert all launch files into monolaunch scripts.  |
 | `set_env(dict)`                       | `<env>`.                                                               |
 | `remap(dict)`                         | `<remap>`.                                                             |
 | `set_param(dict)`                     | `<param>`.                                                             |
@@ -227,7 +229,7 @@ we abuse `$(eval ...)` to do some complex works,
 it is possible because roslaunch fails to ban dunder and builtins
 (/opt/ros/noetic/lib/python3/dist-packages/roslaunch/substitution_args.py, line 298, 343).
 - call `monoparam.to_resolved` to resolve collected parameter file.
-  it returns resolved parameter file, and will be loaded via `<load_param>`.
+  it returns resolved parameter file, and will be loaded via `<rosparam>`.
   note that arg evaluation happens before parameter loading, this should be fine.
 - call `monoresource.sync` to synchronize resources to each machines.
   note that arg evaluation happens before launching nodes.

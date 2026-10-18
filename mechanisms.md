@@ -9,11 +9,12 @@ launch script has two phases: generation phase and launch phase:
   - construct launch file
 - launch
   - relaunch with roscore prefix for the first time
-  - resolved parameters
+  - resolve parameters
   - synchronize resources
   - launch nodes
 
 you can use `--dry-run (1|2|3)` to run until generating launch file/resolving parameters/synchronizing resources.
+use `--dry-run -1` to synchronize the latest logs according to the latest generated launch file, note that it won't generate this time.
 
 keep in mind that this is just a launch file generator,
 you are constructing a launch file, not launching nodes directly.
@@ -86,7 +87,7 @@ there are few downside:
   this is done by programmatically detecting remaps and dealing with them accordingly.
   in other words, this is custom magic; there is no universal way to do it.
 
-- remaps can sometimes be chained together, and sometimes it can not.
+- remaps sometimes are chained together, and sometimes it isn't.
   ```xml
   <remap from="a" to="b"/>
   <remap from="b" to="c"/>
@@ -234,17 +235,46 @@ so that you can overwrite parameters outside included launch files.
 that means set/load param only preserve order up to include.
 it's recommended to convert all your launch files into monolaunch scripts.
 
+<!-- TODO: finish it
 source yaml files, resolved yaml file and ros parameter server can be synchronized dynamically.
 to use this function, user need to launch param_loader on launcher machine:
 ```python
 with node(pkg="monolaunch", type="param_loader.py", ...):
     pass
 ```
-<!-- TODO: fix me -->
+-->
 
 
 ## get_value
-one can also read data from yaml file.
+the normal ways to affect the control flow of a launch file are using environment variables and command arguments,
+but not yaml files, which are heavily used for controlling the behavior of nodes though.
+for example, assume you have a setting `config.yaml#/vehicle/flight_stack`,
+and you want to change a node to launch based on it, you may write
+```xml
+<arg name="vehicle_flight_stack" default="..."/>
+<group if="$(eval vehicle_flight_stack == 'px4')">
+  <node name="mavros" .../>
+</group>
+<group if="$(eval vehicle_flight_stack == 'apm')">
+  <node name="mavros" .../>
+</group>
+
+```
+but now you have to pass in vehicle_flight_stack manually, instead of reading from yaml file.
+there are `<param>` and `<rosparam>` for loading yaml files, but no tag for reading them as arg.
+but you can abuse eval
+```xml
+<arg name="config_expr" default="__import__('yaml').safe_load(open(config))"/>
+<arg name="vehicle_flight_stack" default="$(eval eval(config_expr)['vehicle']['flight_stack'])"/>
+```
+
+if value of configuration doesn't change what you launch, they are only related to how you launch,
+then just use `<param>` and `<rosparam>`.
+however, somethimes environment variables and arguments are needed for controlling nodes
+(ex. `ROSCONSOLE_CONFIG_FILE`, `static_transform_publisher` node).
+in these cases, reading yaml files as args becomes necessary.
+
+in monolaunch, args are just variables, and one can read data from yaml file easily.
 note that parameters cannot be read directly after `set_param`/`load_param` in monolaunch,
 because the actual parameters are set during the launch phase.
 however, you can extract data from a yaml file and then set it as a parameter
@@ -275,6 +305,7 @@ if you only need property of structure, use special field:
 keys = get_value("file/path/to/userconfig.yaml#/sub/struct/__keys__", list) # get keys of map
 length = get_value("file/path/to/userconfig.yaml#/sub/list/__len__", int) # get length of seq
 typename = get_value("file/path/to/userconfig.yaml#/sub/data/__class__", str) # get type name of field
+dunder_len = get_value("file/path/to/userconfig.yaml#/sub/escape/__len__/__self__", int) # use __self__ to escape special field
 ```
 
 we provide json pointer class, it can be extended like `pathlib.Path`
@@ -294,202 +325,16 @@ load_param({ "sub/field": subfield })
 now when you `get_value` and `load_param`, the value will be checked by schema.
 note that due to presence of type information,
 correct default value will be contructed if the field is absence or null.
-moreover, scalar default value described by schema will be used.
+moreover, default value described by schema will be used.
 you should define default values in the json schema, instead of writing the magic number directly in the code.
 that means schema is not just an annotation, but will affect the behavior of `get_value`.
 see below for detail.
 
 
-## Logger
-the ros logging system consists of two parts: rosout mechanism and language specific API.
-
-rosout mechanism is simple, it is just a topic that accept logging messages.
-each logging message contain message content, location, level and node name (no logger name).
-but the functions to actually log messages differ from languages,
-they depend on logging system of each language:
-roscpp uses log4cxx, rospy uses native logging system.
-
-and that is a problem, because now we need multiple config files for different languages.
-lucky, log4cxx and python logging both use hierarchical logging framework,
-where the hierarchy of loggers allows child loggers to override configuration.
-
-for roscpp, full logger name of `ROS_XXX(...)` is `"ros.{package_name}"`,
-and `ROS_XXX_NAMED(...)` append another name after it;
-for rospy, full logger name is the `"rosout.{logger_name}"`,
-where `logger_name` is the argument in `rospy.logxxx(..., logger_name=...)`.
-(yes, it is inconsistent!)
-
-for example, `ROS_INFO("sth")` in package `planner` will log to `ros.planner`,
-and `ROS_INFO_NAMED("sub", "sth")` will log to `ros.planner.sub`;
-`rospy.loginfo("sth")` will log to `rosout`,
-and `rospy.loginfo("sth", logger_name="controller")` will log to `rosout.controller`,
-no matter what package it is in.
-(inconsistent again!)
-
-logger settings for API part can be setup by environment variables
-`ROSCONSOLE_CONFIG_FILE` and `ROS_PYTHON_LOG_CONFIG_FILE` initially,
-and there is no universal method for combining logger settings.
-because they only accept files, management is cumbersome in a multi-machine environment.
-
-we provide some methods to setup logger for both roscpp and rospy at once.
-the logger settings apply to all nodes in the scope,
-and can be partially overrided by logger settings in subscope.
-
-in above example, you can configure their logging levels by:
-```yaml
-ros.planner: DEBUG
-ros.planner.sub: DEBUG
-rosout.controller: DEBUG
-```
-we will generate config files for each node and configure environment variables.
-
-
-## Machine
-the original machanism of `<machine default="true">` simply sets to default globally,
-regardless of which scope/namespace/include it is located in
-(see: https://github.com/ros/ros_comm/issues/1884).
-
-in monolaunch, you can use `with machine(...)` to set default machine **in this scope**.
-to specify the machine the node run on, just use it as context manager:
-```python
-with remote_machine:
-    with node(name="remote_node"):
-        pass
-```
-just like `<machine>` tag, you can call `machine(...)` with explicit arguments (user, password, address, env_loader),
-or use machine scheme url, which is in the form: `machine://usr:psd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2`.
-
-there are three roles for launching nodes on multiple machines: launcher, worker and master.
-they can locate in different machines, and require some environmental setups:
-- launcher:
-  `ROS_MASTER_URI` should be set, and it will be passed to the node process.
-  `ROS_IP` should be set, that is for launch server.
-- worker:
-  `ROS_IP` should be set, which is for advertising topics.
-  it should be setup by env_loader, invoked by roslaunch.
-- master:
-  `ROS_IP` should be set, which is for running roscore.
-  it must match the address of `ROS_MASTER_URI`.
-
-if `ROS_IP` is not set (`ROS_HOSNAME` will be used then) or `ROS_MASTER_URI` uses hostname,
-it is needed to setup `/etc/hosts` for all machines, so that they can find each other.
-the benefit of using `ROS_HOSTNAME` is that it is more robust to network changes.
-one can configure SSH keys for each workers in launcher's machine,
-so that no plain-text password is needed to provide to roslaunch.
-
-in general, `rosrun` just searches up and runs an executable, no matter whether it is a node.
-if it is a node and network settings (`ROS_IP` and `ROS_MASTER_URI`) are missing, it will use localhost by default.
-that is, if you just want to test your node locally,
-you only need to source your `devel/setup.bash`, no network setting is needed.
-but for running a multi-machine launch, network settings become necessary.
-you need to prepare additional setup files for setting up `ROS_IP` and `ROS_MASTER_URI`,
-and put user name/password/address/env loader path into corresponding machine tags,
-which is unpleasant.
-
-### worker
-
-to launch nodes remotely, one should write env-loader script on remote machine,
-which usually do: source setup script, setup `ROS_IP`.
-in the launch file, the env-loader attribute of corresponding machine tag is basically the absolute path to this file.
-the network configurations (`ROS_IP`) are scattered across multiple machines, which is inconvenient.
-luckly, env-loader scripts can be replaced by the trick: `bash -c '...' --`.
-we provide a simplified machine scheme url to solve this problem: `machine://usr@addr/path/to/devel/setup.bash?=setup`,
-where env-loader will be expanded to an inline bash script that source `/path/to/devel/setup.bash` and setup `ROS_IP`.
-on the worker machine, all you need to do is keep the builds in sync.
-
-### master
-
-by default, roslaunch will start roscore automatically if roscore isn't open,
-but if ros master uri refer to a remote machine, roslaunch will wait for roscore.
-community says it is recommended to run roscore by yourself instead of relying on roslaunch.
-I think running roscore alongside with roslaunch is better than keeping roscore up,
-later one make previous parameters interfere with next run, causing awkward bugs.
-it would be convenient if it can launch roscore remotely,
-so we add master node to the launcher:
-```python
-with master_machine:
-    with master(): # roscore will be launched at master_machine
-        pass
-```
-it will be translated into `<master machine="..."/>`,
-which is a removed tag and will be skipped by roslaunch.
-we write a prefix script `with_roscore.py` for command `roslaunch generated_launcher.launch ...`,
-which will parse master tag and launch roscore remotely.
-normally it is impossible to launch roscore as a node from roslaunch itself,
-but I use an absurd technique to achieve it:
-just use `roslaunch` to launch generated launch file, it will be relaunched with prefix.
-note that the launch file must directly after `roslaunch`,
-and `ROS_MASTER_URI` must be unset/untouched/local,
-and roscore is not running.
-
-### launcher
-
-for two nodes with remote machine tags which only differ from env-loader,
-they will be prefixed with coorresponding env-loader.
-however, when the user and address of the machine of a node is equivalent to current user and localhost,
-it will be executed directly without prefixing with env-loader,
-otherwise it may cause some weird bugs due to the difference between composing commands and running commands.
-
-the awkward part is, we have to configure `ROS_IP`, `ROS_MASTER_URI` for launcher and local nodes,
-env-loader of machine scheme uri for local nodes just doesn't work.
-it is difficult to determine whether a machine tag is local at a glance,
-and configuring remote and local machine in different ways is dissatisfied.
-the best way is let launch file configure its machine setting inside itself, that is,
-parse desired machine tag from the launch file, and use it to run the launch file itself.
-for the launch file generated by monolaunch, `with_roscore.py` will parse local and master machine
-and run roscore and roslaunch with correct env-loader.
-
-however, it also affects how we generate launch file:
-generating launch file and running launch file should also be in the same environment.
-the best way still is let launcher generator configure its machine setting inside itself,
-but now it is too complicated to parse.
-
-in monolaunch, you need to put the machine context manager named local at the top scope:
-```python
-with machine(..., name="local"): # its address must be local
-    ... # all nodes should be put under it
-```
-which indicates the machine setting of the launcher itself,
-when the code execute to this line at the first time,
-it will abort and run again with correct env-loader.
-user should not put any branch and important operation before it.
-you don't need to setup network settings (`ROS_IP` and `ROS_MASTER_URI`) for running launcher script,
-they will be configured automatically according to the local machine you set.
-
-
-## Resource
-some ros packages, such as rviz marker, accept resource uri:
-`http://<link path>`, `package://<package name>/<relative path>` and `file://<absolute path>`.
-where file path is the local file path, which does not always work if node changes the place.
-roslaunch doesn't have proper resources management system, user should synchronize resource manually.
-technically, one can store/transfer files as binary data through ros parameter server, but it is not a good idea for large data.
-
-in monolaunch, you can use !resource to mark the string scalar as resource uri,
-and if it is local file, that is `file://<relative or absolute path>`,
-it will be synchronized to proper machine.
-or via
-```python
-set_param({
-    "my_resource": Path(my_resource_path), # Path object is recognized as !resource file://...
-})
-```
-the machine is determined by when it is loaded/set into monolaunch
-```python
-with machine_1:
-    set_param({"file": Path(file_path)})  # file will be synced to machine_1
-with machine_2:
-    load_param({"config": Link.parse(config_link)})  # resources in config_link will be synced to machine_2
-```
-they should be in put into private namespace of the node requires them.
-
-monoparam will translate them to resource uri, like `ros_home://<relative path to ROS_HOME>`,
-so to access those reosurces, just get the resolved resource uri from param server.
-
-
 ## Launch Prefix
-a node process accepts four types of inputs: environmental variables, command arguments, ros parameters and files.
+a node process accepts four types of inputs: environment variables, command arguments, ros parameters and files.
 for roslaunch, they can be set by `<env>` tag, `args` attribute of `<node>` tag, `<param>` or `<rosparam>` tag, and resource uri.
-launch environmental variables and launch arguments can flow into env/args/param easily,
+launch environment variables and launch arguments can flow into env/args/param easily,
 but values in yaml files cannot flow into env/args directly.
 in monolaunch, it is possible via `get_value`, the value will be read during the generation phase.
 `load_param` will load yaml file directly, so you can change your yaml file freely.
@@ -531,14 +376,229 @@ to fix it, use `__import__` instead in this case.
 <!-- TODO: this should be our responsibility -->
 
 
+## Logger
+the ros logging system consists of two parts: rosout mechanism and language specific API.
+
+rosout mechanism is simple, it is just a topic that accept logging messages.
+each logging message contain message content, location, level and node name (no logger name).
+but the functions to actually log messages differ from languages,
+they depend on logging system of each language:
+roscpp uses log4cxx, rospy uses native logging system.
+
+and that is a problem, because now we need multiple config files for different languages.
+lucky, log4cxx and python logging both use hierarchical logging framework,
+where the hierarchy of loggers allows child loggers to override configuration.
+
+for roscpp, full logger name of `ROS_XXX(...)` is `"ros.{package_name}"`,
+and `ROS_XXX_NAMED(...)` append another name after it;
+for rospy, full logger name is the `"rosout.{logger_name}"`,
+where `logger_name` is the argument in `rospy.logxxx(..., logger_name=...)`.
+(yes, it is inconsistent!)
+
+for example, `ROS_INFO("sth")` in package `planner` will log to `ros.planner`,
+and `ROS_INFO_NAMED("sub", "sth")` will log to `ros.planner.sub`;
+`rospy.loginfo("sth")` will log to `rosout`,
+and `rospy.loginfo("sth", logger_name="controller")` will log to `rosout.controller`,
+no matter what package it is in.
+(inconsistent again!)
+
+logger settings for API part can be setup by environment variables
+`ROSCONSOLE_CONFIG_FILE` and `ROS_PYTHON_LOG_CONFIG_FILE` initially,
+and there is no universal method for combining logger settings.
+because they only accept files, management is cumbersome in a multi-machine environment.
+
+we provide two methods (`set_logger` and `load_logger`) to setup logger for both roscpp and rospy using yaml at once.
+they act the same as `set_param` and `laod_param`.
+the logger settings apply to all nodes in the scope (doesn't work on include),
+and can be partially overrided by logger settings in subscope.
+in above example, you can configure their logging levels by:
+```yaml
+ros.planner: DEBUG
+ros.planner.sub: DEBUG
+rosout.controller: DEBUG
+```
+
+it is driven by launch-prefix `setup_logger.py`.
+it will generate logger config from parameter ~$ros_logger_config for roscpp and rospy,
+and setup environmental variable.
+
+
+## Machine
+the original machanism of `<machine default="true">` simply sets to default globally,
+regardless of which scope/namespace/include it is located in
+(see: https://github.com/ros/ros_comm/issues/1884).
+
+there are three roles for launching nodes on multiple machines: launcher, worker and master.
+they can locate in different machines, and require some environment setups:
+- launcher:
+  `ROS_MASTER_URI` should be set, and it will be passed to the node process.
+  `ROS_IP` should be set, that is for launch server.
+- worker:
+  `ROS_IP` should be set, which is for advertising topics.
+  it should be setup by env_loader, invoked by roslaunch.
+- master:
+  `ROS_IP` should be set, which is for running roscore.
+  it must match the address of `ROS_MASTER_URI`.
+
+if `ROS_IP` is not set (`ROS_HOSNAME` will be used then) or `ROS_MASTER_URI` uses hostname,
+it is needed to setup `/etc/hosts` for all machines, so that they can find each other.
+the benefit of using `ROS_HOSTNAME` is that it is more robust to network changes.
+one can configure SSH keys for each workers in launcher's machine,
+so that no plain-text password is needed to provide to roslaunch.
+
+in general, `rosrun` just searches up and runs an executable, no matter whether it is a node.
+if it is a node and network settings (`ROS_IP` and `ROS_MASTER_URI`) are missing, it will use localhost by default.
+that is, if you just want to test your node locally,
+you only need to source your `devel/setup.bash`, no network setting is needed.
+but for running a multi-machine launch, network settings are important.
+you need to prepare additional setup files for setting up `ROS_IP` and `ROS_MASTER_URI`,
+and put user name/password/address/env loader path into corresponding machine tags,
+which is unpleasant.
+
+- **worker**
+
+  to launch nodes remotely, one should write env-loader script on remote machine,
+  which usually do: source setup script, setup `ROS_IP`.
+  in the launch file, the env-loader attribute of corresponding machine tag is basically the absolute path to this file.
+  the network configurations (`ROS_IP`) are scattered across multiple machines, which is inconvenient.
+  luckly, env-loader scripts can be replaced by the trick: `bash -c '...' --`,
+  one can source setup file and assign `ROS_IP` directly inside launch file.
+
+- **master**
+
+  by default, roslaunch will start roscore automatically if roscore isn't open,
+  but if ros master uri refer to a remote machine, roslaunch will wait for roscore.
+  community says it is recommended to run roscore by yourself instead of relying on roslaunch.
+  I think running roscore alongside with roslaunch is better than keeping roscore up,
+  later one make previous parameters interfere with next run, causing awkward bugs.
+  it would be convenient if it can launch roscore remotely.
+
+- **launcher**
+
+  for two nodes with remote machine tags which only differ from env-loader,
+  they will be prefixed with coorresponding env-loader.
+  however, when the user and address of the machine of a node is equivalent to current user and localhost,
+  it will be executed directly without prefixing with env-loader,
+  otherwise it may cause some weird bugs due to the difference between composing commands and running commands.
+
+  the awkward part is, we have to configure `ROS_IP`, `ROS_MASTER_URI` for launcher and local nodes,
+  env-loader of machine scheme uri for local nodes just doesn't work.
+  it is difficult to determine whether a machine tag is local at a glance,
+  and configuring remote and local machine in different ways is dissatisfied.
+  the best way is let launch file configure its machine setting inside itself, that is,
+  parse desired machine tag from the launch file, and use it to run the launch file itself.
+
+  not only running launch file, generating launch file should also be in the same environment.
+  the best way still is let launcher generator configure its machine setting inside itself.
+
+
+in monolaunch, you can use `with machine(...)` to set default machine **in this scope**.
+to specify the machine the node run on, just use it as context manager:
+```python
+with remote_machine:
+    with node(name="remote_node"):
+        pass
+```
+just like `<machine>` tag, you can call `machine(...)` with explicit arguments (user, password, address, env_loader),
+or use machine scheme url, which is in the form: `machine://usr:psd@addr/path/to/env_loader.sh?arg=arg1&arg=arg2`.
+we also provide a simplified machine scheme url: `machine://usr@addr/path/to/devel/setup.bash?=setup`,
+so that no custom env-loader file need to be managed.
+where env-loader will be expanded to an inline bash script `bash -c '...' --` that source `/path/to/devel/setup.bash` and setup `ROS_IP`.
+on the worker machine, all you need to do is keep the builds in sync.
+
+you need to put the machine context manager named `local` at the top scope:
+```python
+with machine(..., name="local"): # its address must be local
+    ... # all nodes should be put under it
+```
+which indicates the machine setting of the launcher itself,
+when the code execute to this line at the first time,
+it will abort and run again with correct env-loader.
+user should not put any branch and important operation before it.
+
+we add master node to the launcher:
+```python
+with machine(...): # setup machine of roscore
+    with master(): # roscore will be launched at that machine
+        pass
+```
+it will be translated into `<master machine="..."/>`,
+which is a removed tag and will be skipped by roslaunch.
+we write a prefix script `with_roscore.py` for command `roslaunch generated_launcher.launch ...`,
+which will parse master tag and launch roscore remotely.
+normally it is impossible to launch roscore as a node from roslaunch itself,
+but I use an absurd technique to achieve it:
+we abuse `$eval(...)` to run `os.execv` for rerun original roslaunch command with prefix `with_roscore.py`.
+just use `roslaunch` to launch generated launch file.
+note that the launch file must directly after `roslaunch`,
+and `ROS_MASTER_URI` must be unset/untouched/local,
+and roscore is not running.
+you don't need to setup network settings (`ROS_IP` and `ROS_MASTER_URI`) for running launcher script,
+they will be configured automatically according to the local machine you set.
+
+note that there are two rerun timepoints (see [Process](#Process)):
+first, we rerun generation code (the `@launch` function you define) after hitting the local machine for the first time.
+this is for configuring environment for generation phase.
+second, we relaunch generated launch file with roscore prefix for the first time.
+this is for configuring environment for launch phase.
+
+
+## Resource
+some ros packages, such as rviz marker, accept resource uri:
+`http://<link path>`, `package://<package name>/<relative path>` and `file://<absolute path>`.
+where file path is the file path in the local machine, which does not always work for multi-machine launch.
+roslaunch doesn't have proper resources management system, user should synchronize resource manually.
+technically, one can store/transfer files as binary data through ros parameter server, but it is not a good idea for large data.
+
+in monolaunch, you can use !resource to mark the string scalar as resource uri,
+and if it is a file path, that is `file://<relative or absolute path>`,
+it will be synchronized to proper machine.
+or via
+```python
+set_param({
+    "my_resource": Path(my_resource_path), # Path object is recognized as !resource file://...
+})
+```
+the machine is determined by when it is loaded/set into monolaunch
+```python
+with machine_1:
+    set_param({"file": Path(file_path)})  # file will be synced to machine_1
+with machine_2:
+    load_param({"config": Link.parse(config_link)})  # resources in config_link will be synced to machine_2
+```
+they should be put into private namespace of the node requires them.
+
+monoparam will translate them to resource uri, like `ros_home://<relative path to ROS_HOME>`,
+so to access those reosurces, just get the resolved resource uri from param server,
+and prepend relative path with `$ROS_HOME/`.
+this require manual decoding, third party libraries like rviz model marker cannot understand it.
+such decoding is necessary because we cannot determine an universal path for any machine.
+ros home is obviously the best place for runtime data, but its location depends on runtime environment setup.
+<!-- maybe under `/tmp`? -->
+
+
 # Monoparam
 configurations are stored and managed as yaml files.
-yaml is just a human readable format of json object, but supports expandable tag semantics.
-you can use the `!include` tag to include multiple yaml files,
+yaml is (almost) just a human readable format of json, but supports expandable tag semantics.
+in monoparam, you can use the `!include` tag to include multiple yaml files,
 which allows you to separate configurations and brings great benefits.
 `!merge` tag is also supported, so that one can overlay included yaml file instead of modifying it directly.
 it allows you to modify/extend part of existing configuration without touching it.
 to manage resources, we invent `!resource` tag, so that following url can be recognized and modified accordingly.
+
+## Simple yaml
+in fact, yaml is not just another format of json.
+based on json spec, json doesn't have distinct integer type, numbers are always floating numbers, and nan and inf are not allowed.
+however, most of json serializer supports distinct integer type and js-like nan/inf (nlohmann_json excluded).
+for yaml, nan and inf can be represented as `.nan` and `.inf`.
+yaml also allow any type of map keys.
+yaml allows object reference natively via `&` and `*`, which even work for cyclic reference structure.
+
+we only want to use yaml as another format of json,
+so we write a [custom serializer](./src/monolaunch/yaml_utils.py) for banning the unwanted structure (any map key type, node reference),
+and utilize tags for the functionalities we want to add (!include, !merge).
+we also write monoparam for more advance resolve mechanism closely related to monolaunch.
+
 
 ## Include
 `!include` should be followed by the path of yaml file to be included.
@@ -612,7 +672,7 @@ the advantages of this design are obvious:
 
 based on purposes, configurations can be categorized into:
 - calibration data:  
-  the calibration of sensors, such as intrinsics/extriniscs of stereo camera, imu-cam extrinsics,
+  the calibration of sensors, such as intrinsics/extrinsics of stereo camera, imu-cam extrinsics,
   should remain unchanged unless the mechanical structures or internal components change.
   also calibration data are usually produced by another program,
   which should be managed in a separated directory,
@@ -624,16 +684,22 @@ based on purposes, configurations can be categorized into:
   you also don't want to touch it once it's tuned to the optimal state.
   separating them from other configurations can also hide their complexity.
   aside from their purposes, the algorithm parameters are similar to calibration data;
-  the only difference is whether there is a systematic method to determining these parameters.
+  the main difference is whether there is a systematic method to determining these parameters.
 - feature settings:  
   these are about general settings of features, such as use which algorithm,
   connect to which sensors, frame ID name, publish to which topics,
   delay time of some operations, etc.
   they usually can be configured by strings or integers, which are easy to adjust for frontend users.
-- environmental settings:  
+- environment settings:  
   some configurations are necessarily related to the machine/device you are using,
   and cannot be ported to the same application on different machines.
   such as network/authentication settings, sensor's device ID, buildspace path, etc.
+  configurations are tightly related to your programs,
+  so that they should be managed in the same repository,
+  at least a default/example configuration should be stored in the repository.
+  in this sense, environment settings are not suitable be included,
+  since it contains unportable and sensitive information.
+  so it must be stored outside of your configuration folders.
 
 
 ## Merge
@@ -753,6 +819,7 @@ similarly, it also doesn't make sense for sequence that represents order:
     ...
 ```
 however, this is fine for rosparam's merging rule.
+if the length of sequence are fixed, both act the same, but the invalid length case cannot be determined after merge.
 you should use single string
 ```yaml
 !merge
@@ -777,7 +844,15 @@ another example, assume you have a set of cameras, which have configurations sto
 ```
 under our merging rules, it is impossible to remove one of camera, or replace both completely to single camera.
 if you use rosparam merging rules, now the problem becomes you cannot override single property of one of camera.
-you should use map instead, so that each camera can be referenced with proper name.
+in this example, you should use map instead, so that each camera can be referenced with proper name.
+
+sequence sometimes causes ambiguity,
+```yaml
+pose:
+  position: [1.0, 2.0, 0.0]
+  orientation: [-0.5, 0.5, -0.5, 0.5]
+```
+we know `orientation` is a quaternion, but is it `xyzw` or `wxyz`?
 
 a good design principle is: don't use sequence in configuration, always use map.
 if you must use seq, then only include scalars.
@@ -809,7 +884,7 @@ and in any node run on any machine, you can read that file through the resolved 
 
 to make a single resource uri that is accessible on any machine,
 a meaningful, generic path prefix is needed, and `$ROS_HOME` is the most suitable.
-however, we don't allow environmental variable appear in the path, otherwise the meaning becomes runtime dependent.
+however, we don't allow environment variable appear in the path, otherwise the meaning becomes runtime dependent.
 ros_home uri is invented for this purpose: it opens a special case for `$ROS_HOME`, and anyone can understand it at a glance.
 
 local resources will be synchronized to the machine when it is loaded/set into monolaunch,
@@ -901,11 +976,12 @@ different types have different default value resolving rules
 - dict: `{}`
 - struct: `{ <key1>: <default value of this field>, ... }`
 - null: `null`
-- scalar: default value described by metadata, or zero value of given type
-- enum: default value described by metadata, or the first value of enum
+- scalar: zero value of given type
+- enum: the first value of enum
 - wrap: default value of underlying type
 - ref: default value of underlying type
 - any: `null`
+if default value is defined in schema metadata, use it first.
 note that dict and struct both are encoded into map, but have different defaulting behavior.
 similar to the merging rules, we treat null as an empty slot:
 value `null` annotated with given schema will be resolved to the corresponding default value.
@@ -926,7 +1002,7 @@ and all possible configuration errors will be revealed early.
 json schema offers similar benefits.
 it allows the advantages of type checking to be realized in data format and resolver.
 with json pointer attached with schema, content will be type-checked during `get_value` and `load_param`.
-compared with non-typed version, you have to deal with absence of `get_value` and assign proper default value,
+compared with untyped version, you have to deal with absence of `get_value` and assign proper default value,
 which make the parsing logic be scattered throughout the launch script.
 `with_schema` provides a way to setup schema of full config file once and use everywhere.
 
@@ -947,3 +1023,31 @@ load_param({
 however, `load_param` is the better for the future use:
 don't resolve config in the generation phase, include it, so that you can change it before launch phase.
 the ease of full deserializing becomes a trap here.
+
+
+## Access
+monoparam not only serialize/deserialize yaml file with custom tags,
+but also be able to modify them reflectly, which is way harder.
+
+one principle must be adhered to: it should act just like static parser in the ros node.
+not every parsers act the same, especially for the defaulting behavior.
+we stick to my another library `structmapper`.
+if in the ros node, the param `/camera_info/intrinsic/fx` reads 100.0,
+then in the launch script, `get_value("camera_config.yaml#/camera_info/intrinsic/fx")` should also be 100.0.
+
+then we have homomorphism rule:
+accessing the value along two pointers and one combined pointer should be the same.
+for example, `get_value("camera_config.yaml#/camera_info")["intrinsic"]["fx"]`
+should equal to `get_value("camera_config.yaml#/camera_info/intrinsic/fx")`.
+
+an important part is if defaulting behavior works the same, as described above.
+in the above example, if this param in the ros node is read as 100.0 due to defaulting behavior,
+then `get_value` should also get 100.0 correctly.
+defaulting may happen at `camera_config.yaml#`, `camera_config.yaml#/camera_info`, `camera_config.yaml#/camera_info/intrinsic` or `camera_config.yaml#/camera_info/intrinsic/fx`, `get_value` should work the same for all cases.
+
+it is also able to modify structure of yaml with include/merge,
+this is for aggregate configurations for monolaunch.
+so we cannot embed resolving logic into pyyaml loader/dumper like we do in `yaml_utils`.
+for example, we have to remember a node in a resolved yaml come from which files,
+so that modifying that node becomes possible.
+
