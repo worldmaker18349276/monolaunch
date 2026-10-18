@@ -1057,14 +1057,17 @@ def run(launch_func: Callable[[], None]) -> Any:
     cmd()
 
 def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
-    argparser = argparse.ArgumentParser(
-        add_help=False,
-        usage="%(prog)s [--gen-verbose] [--dry-run STAGE] [ARGS ...]",
-    )
+    argparser = argparse.ArgumentParser(add_help=False)
     argparser.add_argument(
         "--dry-run",
-        type=int, choices=range(4), default=0,
-        help="0: just run, 1: until generating launch file, 2: until resolving yaml file, 3: until syncing resources, -1: sync latest logs"
+        type=int, choices=range(-1, 4), metavar="STAGE", default=0,
+        help=(
+            "0: just run, "
+            "1: until generating launch file, "
+            "2: until resolving yaml file, "
+            "3: until syncing resources, "
+            "-1: sync latest logs"
+        )
     )
     argparser.add_argument(
         "--gen-verbose",
