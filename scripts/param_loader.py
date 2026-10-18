@@ -6,7 +6,7 @@ from monolaunch.monoparam import *
 import rospy
 from std_msgs.msg import String
 
-def main(source: Path, update_rate: float):
+def main(source: Path, resolved: Path, update_rate: float):
     def formatwarning(message, category, filename, lineno, line=None): # type: ignore
         return f"\033[33m[{category.__name__}] {message}\n\033[m" # type: ignore
 
@@ -15,8 +15,7 @@ def main(source: Path, update_rate: float):
     pub = rospy.Publisher("param_update", String, queue_size=10)
 
     source = source.resolve()
-    source_resolved = source.parent / f"{source.stem}.resolved.yaml"
-    sync = YAMLSynchronizer(source, source_resolved)
+    sync = YAMLSynchronizer(source, resolved)
     sync.init()
 
     def update(diff: Dict[PathWithJPointer, Optional[JSON]]):
@@ -38,5 +37,6 @@ def main(source: Path, update_rate: float):
 if __name__ == "__main__":
     rospy.init_node("param_loader")
     param_source = Path(rospy.get_param("/$monoparam_source", ""))
+    param_resolved = Path(rospy.get_param("/$monoparam_resolved", ""))
     update_rate = 10.0
-    main(param_source, update_rate)
+    main(param_source, param_resolved, update_rate)

@@ -1955,6 +1955,7 @@ class YAMLWatcher:
     depends: Set[Path]
     node: Optional[SourcedNode]
     data: JSON
+    metadata: Optional[Dict[str, JSON]]
 
     def __init__(self, path: Path):
         self.loader = SourceLoader()
@@ -1964,6 +1965,7 @@ class YAMLWatcher:
         self.depends = {self.path}
         self.node = None
         self.data = None
+        self.metadata = None
 
     def is_changed(self) -> bool:
         return any(self.mtimes.get(depend, 0) != get_mtime(depend) for depend in self.depends)
@@ -1974,7 +1976,7 @@ class YAMLWatcher:
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning)
-    def load(self, skip_empty: bool, aggregate_sync_resources: bool):
+    def load(self, skip_empty: bool, aggregate_sync_resources: bool, attach_metadata: bool):
         """
         reload yaml file and resolved it.
         if skip_empty is true, null and empty mapping will be skipped.
@@ -2018,6 +2020,9 @@ class YAMLWatcher:
         
         if skip_empty:
             data = deep_copy_skip_empty(data)
+        if attach_metadata and self.metadata is not None:
+            for key, value in self.metadata.items():
+                cast(Dict[str, JSON], data)[key] = value
         if aggregate_sync_resources:
             assert sync_resources is not None
             sync_resources_json = SyncInfo.to_list(sync_resources)
@@ -2139,10 +2144,15 @@ class YAMLSynchronizer:
     _back_resolved_listeners: List[_BackResolvedListener]
     skip_empty: bool = True
     aggregate_sync_resources: bool = True
+    attach_metadata: bool = True
     
     def __init__(self, original_path: Path, resolved_path: Path):
         self.original = YAMLWatcher(original_path)
         self.resolved = YAMLWatcher(resolved_path)
+        self.original.metadata = {
+            "$monoparam_source": str(original_path),
+            "$monoparam_resolved": str(resolved_path),
+        }
         self._resolved_listeners = []
         self._back_resolved_listeners = []
 
@@ -2153,7 +2163,7 @@ class YAMLSynchronizer:
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning)
     def init(self):
-        self.resolved.load(self.skip_empty, self.aggregate_sync_resources)
+        self.resolved.load(False, False, False)
 
     def get_status(self):
         status = ""
@@ -2180,7 +2190,7 @@ class YAMLSynchronizer:
             warnings.warn(SyncFileNotReadyWarning("resolved"))
             return {}
 
-        self.original.load(self.skip_empty, self.aggregate_sync_resources)
+        self.original.load(self.skip_empty, self.aggregate_sync_resources, self.attach_metadata)
         if self.original.node is None:
             warnings.warn(SyncFileNotReadyWarning("original"))
             return {}
@@ -2209,7 +2219,7 @@ class YAMLSynchronizer:
             warnings.warn(SyncFileNotReadyWarning("resolved"))
             return {}
 
-        self.resolved.load(False, False)
+        self.resolved.load(False, False, False)
         if self.resolved.node is None: # pyright: ignore[reportUnnecessaryComparison]
             warnings.warn(SyncFileNotReadyWarning("resolved"))
             return {}
@@ -2414,6 +2424,7 @@ def to_resolved(source_path: Union[str, Path, PathWithJPointer, PathWithXPointer
     sync = YAMLSynchronizer(source_path, resolved_path)
     sync.skip_empty = skip_empty
     sync.aggregate_sync_resources = aggregate_sync_resources
+    sync.attach_metadata = True
     sync.init()
     sync.resolve()
 
