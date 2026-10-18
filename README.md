@@ -86,7 +86,7 @@ def drone_vins(vins_config: Link, rosconsole_config: Path, vehicle_name: str, ve
 it's now clean and readable.
 to make it launchable, you should write a main function
 ```python
-@run
+@launch
 def main():
     import argparse
     argparser = argparse.ArgumentParser()
@@ -112,7 +112,7 @@ it will generate one launch file and launch it.
 the basic structure is the same, almost every tag has a corresponding function:
 | python                                | launch                                                                 |
 | ------------------------------------- | ---------------------------------------------------------------------- |
-| `run(launch_func)`                    | run launch script.  it will generate a launch file and launch the      |
+| `launch(launch_func)`                 | run launch script.  it will generate a launch file and launch the      |
 |                                       | program under current work directory.                                  |
 | `with group(ns=...)`                  | `<group>`.                                                             |
 | `with node(name, pkg, type, ...)`     | `<node>`.                                                              |

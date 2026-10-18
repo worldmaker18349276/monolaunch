@@ -34,7 +34,7 @@ from .monoparam import FieldAccessWarning, Resource, SchemaSource, SourceLoader,
 from .monoresource import Machine
 
 __all__ = [
-    "run",
+    "launch",
     "group", "node", "include", "master",
     "set_param", "load_param", "get_value",
     "PathWithJPointer", "TypedPathWithJPointer",
@@ -1048,15 +1048,14 @@ def generate(launch_func: Callable[[], None], launch_filepath: Path, need_regen:
 
         return launch_filepath
 
-# TODO: rename to launch
-def run(launch_func: Callable[[], None]) -> Any:
+def launch(launch_func: Callable[[], None]) -> Any:
     if launch_func.__globals__["__name__"] != "__main__":
         return launch_func
     # only run on main
-    cmd = _run(launch_func)
+    cmd = _launch(launch_func)
     cmd()
 
-def _run(launch_func: Callable[[], None]) -> Callable[[], None]:
+def _launch(launch_func: Callable[[], None]) -> Callable[[], None]:
     argparser = argparse.ArgumentParser(add_help=False)
     argparser.add_argument(
         "--dry-run",
