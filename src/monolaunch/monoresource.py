@@ -242,9 +242,6 @@ def _rsync_ssh_accept_new() -> List[str]:
 
 
 def rsync(source: str, destination: str, machine: Machine, check_only: bool):
-    if Path(source).is_dir():
-        source = str(Path(source)) + "/"
-
     dst_parent = str(Path(destination).parent)
     host_prefix = machine.host_prefix()
     destination_with_host = host_prefix + destination
@@ -277,6 +274,63 @@ def rsync(source: str, destination: str, machine: Machine, check_only: bool):
             *extra,
             source, destination_with_host,
         ], check=True)
+
+def back_rsync(source: str, destination: str, machine: Machine):
+    Path(source).parent.mkdir(parents=True, exist_ok=True)
+
+    host_prefix = machine.host_prefix()
+    destination_with_host = host_prefix + destination
+
+    extra: List[str] = _rsync_ssh_accept_new()
+    password_args = machine.password_args()
+    print(f"transfer {source} <- {destination_with_host}")
+    subprocess.run([
+        *password_args,
+        "rsync", "-avz", "--checksum",
+        *extra,
+        destination_with_host, source,
+    ], check=True)
+
+@contextlib.contextmanager
+def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
+    suf = "/" if source.exists() and source.is_dir() else ""
+
+    from uuid import uuid4
+    remote_tmp_dir = Path(f"/tmp/temp_rsync_{os.getpid()}_" + str(uuid4()).replace("-", "_"))
+    destination = remote_tmp_dir / source.name
+
+    password_args = machine.password_args()
+    destination_with_host = machine.host_prefix() + str(destination)
+
+    extra: List[str] = _rsync_ssh_accept_new()
+    extra += ["--rsync-path", f"mkdir -p {shlex.quote(str(remote_tmp_dir))} && rsync"]
+
+    try:
+        print(f"transfer {source} -> {destination_with_host}")
+        subprocess.run([
+            *password_args,
+            "rsync", "-avz", "--checksum",
+            *extra,
+            str(source) + suf, destination_with_host + suf,
+        ], check=True)
+
+        try:
+            yield destination
+
+        finally:
+            print(f"transfer {source} <- {destination_with_host}")
+            subprocess.run([
+                *password_args,
+                "rsync", "-avz", "--checksum",
+                *extra,
+                destination_with_host + suf, str(source) + suf,
+            ], check=True)
+
+    finally:
+        print(f"remove temp directory {remote_tmp_dir}")
+        cmd = machine.command(["rm", "-r", str(remote_tmp_dir)], with_env_loader=False)
+        subprocess.run(cmd, check=True)
+
 
 @dataclasses.dataclass(frozen=True)
 class SyncInfo:
@@ -343,48 +397,9 @@ def sync(params_link: str):
             destinations = remote_expandvars_many(machine, [i.destination for i in group])
             for info, expanded_destination in zip(group, destinations):
                 expanded_source = expandvars(info.source)
-                print(f"rsync {expanded_source} -> {expanded_destination}")
+                if Path(expanded_source).is_dir():
+                    expanded_source = str(Path(expanded_source)) + "/"
                 rsync(expanded_source, expanded_destination, machine, info.check_only)
-
-@contextlib.contextmanager
-def temp_rsync(source: Path, machine: Machine) -> Generator[Path, None, None]:
-    suf = "/" if source.exists() and source.is_dir() else ""
-
-    from uuid import uuid4
-    remote_tmp_dir = Path(f"/tmp/temp_rsync_{os.getpid()}_" + str(uuid4()).replace("-", "_"))
-    destination = remote_tmp_dir / source.name
-
-    password_args = machine.password_args()
-    destination_with_host = machine.host_prefix() + str(destination)
-
-    extra: List[str] = _rsync_ssh_accept_new()
-    extra += ["--rsync-path", f"mkdir -p {shlex.quote(str(remote_tmp_dir))} && rsync"]
-
-    try:
-        print(f"transfer {source} -> {destination_with_host}")
-        subprocess.run([
-            *password_args,
-            "rsync", "-avz", "--checksum",
-            *extra,
-            str(source) + suf, destination_with_host + suf,
-        ], check=True)
-
-        try:
-            yield destination
-
-        finally:
-            print(f"transfer {destination_with_host} -> {source}")
-            subprocess.run([
-                *password_args,
-                "rsync", "-avz", "--checksum",
-                *extra,
-                destination_with_host + suf, str(source) + suf,
-            ], check=True)
-
-    finally:
-        print(f"remove temp directory {remote_tmp_dir}")
-        cmd = machine.command(["rm", "-r", str(remote_tmp_dir)], with_env_loader=False)
-        subprocess.run(cmd, check=True)
 
 @contextlib.contextmanager
 def prun(name: str, command: Sequence[str], force_exit: bool = False, exit_timeout: float = 10, **kwargs: Any):
@@ -516,28 +531,37 @@ def _get_machines_from_launch(launch_file: Path) -> Dict[str, Machine]:
 def sync_latest_logs(launch_file: str):
     machines = _get_machines_from_launch(Path(launch_file))
 
+    by_machine: Dict[Machine, List[str]] = {}
+    for machine_name, machine in machines.items():
+        machine = machine.reduce_local()
+        by_machine.setdefault(machine, []).append(machine_name)
+
     local_log_dir = remote_expandvars(machines["local"], "${ROS_LOG_DIR}")
     local_log_dir = (Path(local_log_dir) / "latest").resolve()
     local_log_dir.mkdir(exist_ok=True)
-    
-    for machine_name, machine in machines.items():
-        if machine_name == "local":
-            continue
-        remote_log_dir = remote_expandvars(machine, "${ROS_LOG_DIR}")
-        remote_log_dir += "/" + local_log_dir.name
 
-        password_args = machine.password_args()
-        remote_log_dir_with_host = machine.host_prefix() + remote_log_dir
+    with tempfile.TemporaryDirectory(prefix=local_log_dir.name, dir=local_log_dir.parent) as local_log_dir_tmp:
+        local_log_dir_tmp = Path(local_log_dir_tmp)
 
-        print(f"transfer {remote_log_dir_with_host}/ -> {local_log_dir}/{machine_name}/")
-        r = subprocess.run([
-            *password_args,
-            "rsync", "-avz", "--ignore-missing-args",
-            *_rsync_ssh_accept_new(),
-            remote_log_dir_with_host + "/", str(local_log_dir / machine_name) + "/",
-        ])
-        if r.returncode not in (0, 24):   # 24 = files vanished during transfer, harmless
-            raise subprocess.CalledProcessError(r.returncode, r.args)
+        with ssh_multiplexing():
+            for machine, machine_names in by_machine.items():
+                if "local" in machine_names:
+                    assert "local" == machine_names[0]
+                    continue
+                machine_name = machine_names[0]
+
+                remote_log_dir = remote_expandvars(machine, "${ROS_LOG_DIR}")
+                remote_log_dir += "/" + local_log_dir.name + "/"
+                back_rsync(str(local_log_dir_tmp / machine_name) + "/", remote_log_dir, machine)
+
+        for file in local_log_dir_tmp.iterdir():
+            shutil.copy2(file, local_log_dir / file.name)
+        for machine, machine_names in by_machine.items():
+            if "local" in machine_names:
+                assert "local" == machine_names[0]
+                Path(local_log_dir / "local").symlink_to("..", True)
+            for machine_name in machine_names[1:]:
+                Path(local_log_dir / machine_name).symlink_to(machine_names[0], True)
 
 __all__ = ["sync", "run_remote_task", "sync_latest_logs"]
 
