@@ -1776,15 +1776,20 @@ class SourceLoader:
             FieldAccessWarning, SchemaFieldAccessWarning,
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning)
     def load_resolve_all(self, link: PathWithJPointer) -> JSON:
-        if isinstance(link, TypedPathWithJPointer):
-            link.schema
-            link.schema_root
-            ...
         link = link.resolve()
 
         data = None
         node = self.load(link.filepath)
-        node = self.walk(node, link.fieldpath)
+        if not isinstance(link, TypedPathWithJPointer):
+            node = self.walk(node, link.fieldpath)
+        else:
+            node_ = self.walk(node, link.fieldpath[:link.schema_root])
+            if node_ is None:
+                node = None
+            else:
+                if not SchemaSource.is_any(link.schema):
+                    node_ = self.with_new_schema(node_, None, link.schema)
+                node = self.walk(node_, link.fieldpath[link.schema_root:])
         if node is not None:
             data = self.resolve_all(node)
         return data
@@ -2021,6 +2026,7 @@ class YAMLWatcher:
         if skip_empty:
             data = deep_copy_skip_empty(data)
         if attach_metadata and self.metadata is not None:
+            data = data if data is not None else {}
             for key, value in self.metadata.items():
                 cast(Dict[str, JSON], data)[key] = value
         if aggregate_sync_resources:

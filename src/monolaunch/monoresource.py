@@ -432,7 +432,7 @@ def prun(name: str, command: Sequence[str], force_exit: bool = False, exit_timeo
                 process.wait(timeout=exit_timeout)
             except subprocess.TimeoutExpired:
                 if not force_exit: raise
-                print(f"[with_roscore] fail to interrupt process {name} ({command}), will kill it")
+                print(f"fail to interrupt process {name} ({command}), will kill it")
                 process.kill()
                 process.wait()
 
@@ -540,28 +540,23 @@ def sync_latest_logs(launch_file: str):
     local_log_dir = (Path(local_log_dir) / "latest").resolve()
     local_log_dir.mkdir(exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix=local_log_dir.name, dir=local_log_dir.parent) as local_log_dir_tmp:
-        local_log_dir_tmp = Path(local_log_dir_tmp)
-
-        with ssh_multiplexing():
-            for machine, machine_names in by_machine.items():
-                if "local" in machine_names:
-                    assert "local" == machine_names[0]
-                    continue
-                machine_name = machine_names[0]
-
-                remote_log_dir = remote_expandvars(machine, "${ROS_LOG_DIR}")
-                remote_log_dir += "/" + local_log_dir.name + "/"
-                back_rsync(str(local_log_dir_tmp / machine_name) + "/", remote_log_dir, machine)
-
-        for file in local_log_dir_tmp.iterdir():
-            shutil.copy2(file, local_log_dir / file.name)
+    with ssh_multiplexing():
         for machine, machine_names in by_machine.items():
             if "local" in machine_names:
                 assert "local" == machine_names[0]
-                Path(local_log_dir / "local").symlink_to("..", True)
-            for machine_name in machine_names[1:]:
-                Path(local_log_dir / machine_name).symlink_to(machine_names[0], True)
+                continue
+            machine_name = machine_names[0]
+
+            remote_log_dir = remote_expandvars(machine, "${ROS_LOG_DIR}")
+            remote_log_dir += "/" + local_log_dir.name + "/"
+            back_rsync(str(local_log_dir.parent / f"{local_log_dir.name}-{machine_name}") + "/", remote_log_dir, machine)
+
+    for machine, machine_names in by_machine.items():
+        for machine_name in machine_names:
+            link = f"../{local_log_dir.name}-{machine_names[0]}" if machine_names[0] != "local" else "."
+            path = local_log_dir / machine_name
+            if not path.exists():
+                path.symlink_to(link, True)
 
 __all__ = ["sync", "run_remote_task", "sync_latest_logs"]
 

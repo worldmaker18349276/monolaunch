@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
+Run roslaunch with automatic roscore management.
+
+Requires <machine name="local" .../> and optionally <master machine="..." mode="auto|start|wait"/>.
+roslaunch command will be rerun on "local" machine;
+roscore will be managed based on the mode:
+auto  -- launch if not open yet.
+start -- start a new master.
+wait  -- wait until master is opened.
+
 uage:
-with_roscore.py roslaunch <launch_file.launch> ...
+with_roscore.py                                 roslaunch <launch_file.launch> ...
 with_roscore.py --filename <launch_file.launch> roslaunch ...
 """
 
@@ -104,16 +113,25 @@ def main():
         print("[with_roscore] master is online, just run roslaunch:\n" + shlex.join(command))
         os.execv(command[0], command)
 
+    if master_mode == "start" and is_master_online():
+        print("[with_roscore] master mode is start, but master is already online")
+        sys.exit(1)
+
     roscore = master.command(["roscore"], tt=True)
     command[1:1] = ["--wait"] # force to wait my roscore
     command = local.command(command)
-
-    print("[with_roscore] run roscore:\n" + shlex.join(roscore))
-    #                             _________________ to prevent SIGINT propagates into subprocess
-    with prun("roscore", roscore, start_new_session=True):
-        print("[with_roscore] run roslaunch:\n" + shlex.join(command))
-        with prun("roslaunch", command, force_exit=True, exit_timeout=30) as roslaunch_proc:
-            result_returncode = roslaunch_proc.wait()
+    try:
+        print("[with_roscore] run roscore:\n" + shlex.join(roscore))
+        #                             _________________ to prevent SIGINT propagates into subprocess
+        with prun("roscore", roscore, start_new_session=True):
+            try:
+                print("[with_roscore] run roslaunch:\n" + shlex.join(command))
+                with prun("roslaunch", command, force_exit=True, exit_timeout=30) as roslaunch_proc:
+                    result_returncode = roslaunch_proc.wait()
+            finally:
+                print("[with_roscore] roslaunch has stopped")
+    finally:
+        print("[with_roscore] roscore has stopped")
     sys.exit(result_returncode)
 
 if __name__ == "__main__":

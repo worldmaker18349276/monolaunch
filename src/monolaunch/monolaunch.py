@@ -10,6 +10,8 @@ see README for detail.
 
 # TODO: typecheck user input
 
+# TODO: add docstring for every functions
+
 import argparse
 import contextlib
 import functools
@@ -991,7 +993,7 @@ def generate(launch_func: Callable[[], None], launch_filepath: Path, need_regen:
         launch_el.append(ET.Element("arg", dict(name="auto_relaunch_with_roscore_res", default="$(eval eval(auto_relaunch_with_roscore_expr))")))
 
         # add param resolver
-        if param_node:
+        if param:
             launch_el.append(ET.Element("arg", dict(
                 name="source_param_pointer",
                 default="$(arg filename)#xpointer(/launch/rosparam[@param='/'])",
@@ -1008,7 +1010,7 @@ def generate(launch_func: Callable[[], None], launch_filepath: Path, need_regen:
         launch_el.append(dry_run_2)
 
         # add resource loader
-        if param_node:
+        if param:
             sync_resources_expr = f"__import__('monolaunch.monoresource').monoresource.sync(resolved_param + '#/$sync_resources')"
             launch_el.append(ET.Element("arg", dict(name="sync_resources_expr", default=sync_resources_expr)))
             launch_el.append(ET.Element("arg", dict(name="sync_resources", default="$(eval eval(sync_resources_expr))")))
@@ -1034,9 +1036,11 @@ def generate(launch_func: Callable[[], None], launch_filepath: Path, need_regen:
                 launch_el.append(node.to_xml(machine_xml=node.machine.to_xml(default=True)))
 
         # load param in the end, so that it override other rosparam set/load in <include>
-        if param_node:
+        if param:
             param_el = ET.Element("rosparam", dict(command="load", file="$(arg resolved_param)", param="/"))
             param_el.text = yaml.dump(param, Dumper=SourcedYAMLDumper, sort_keys=False)
+            if param_el.text.endswith("\n...\n"):
+                param_el.text = param_el.text[:-len("...\n")] # it will be indented, which break the syntax of document end
             launch_el.append(param_el)
 
         _indent(launch_el)
