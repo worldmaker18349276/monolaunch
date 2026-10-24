@@ -164,7 +164,7 @@ the original mechanism of `<param>` is:
     <param name="sub/field" .../>
   </node>
   ```
-- param with yaml type will replace all contents directly:
+- unlike `rosparam set`, `<param>` just replace all contents directly:
   ```xml
   <param name="/a/b" type="int" value="1"/>
   <param name="/a" type="yaml" value="{c: 2}"/>
@@ -199,7 +199,7 @@ in monolaunch, names are always expanded under current namespace
 noting that `~/field` and `~field` are the same in monolaunch, just replace `~` with `/ns/node_name/`.
 there is no way to apply a param to every nodes in the affect region, does anyone actually need this?
 
-to set/load param in monolaunch, use set_param and load_param, they can be nested structure, for example:
+to set/load param in monolaunch, use `set_param` and `load_param`, they can be nested structure, for example:
 ```python
 set_param({
     "nested": {
@@ -211,20 +211,33 @@ set_param({
     "path/to/field": "folded path is also valid",
     "path/to": {
         "another/field": "nested folded path? of cause!",
-        "": "empty path? fair enough~",
+        "": "this is an empty path, not empty map key",
     },
     "~": {
         "field": "yes, this is equivalent to ~field",
+        "note": "`~` can only be use in the first level of dictionary",
     },
-    "array/0/x": "number will be treated as indexing, so this refer to curr_param.array[0].x",
+    "not_array/0/x": "number will be treated as map key, so this refer to curr_param['not_array']['0']['x']",
 })
 ```
 
-in load_param, its values are treated as file paths to load:
+in `load_param`, its values are treated as file paths to load:
 ```python
 load_param({"another/path": "file/path/to/subconfig.yaml#/sub/field"})
 ```
 this will load `file/path/to/subconfig.yaml`, take field `/sub/field`, and put into `another/path`
+
+the path of param, like command `rosparam get /a/b/c` and `<param name="/a/b/c" .../>`,
+are sequence of map keys separated by `/`, no matter if it is a number, and empty keys will be stripped out.
+this is slightly different from json pointer.
+in json pointer, the type of element of path is decided until accessing:
+`#/not_array/0/x` may refer to `curr_param['not_array'][0]['x']` if `curr_param['not_array']` is an array.
+and `#/a/b//c` is different from `#/a/b/c`, empty string will not be stripped out in json pointer.
+in `set_param`/`load_param`, map keys follow the same rules as in `rosparam`/`<param>`/rospy/roscpp api,
+so it is impossible to set a map key like `a/b/c` and empty string.
+in fact, it is still possible to set such kind of map keys via yaml:
+`<param name="bad_map" value="{'a/b/c': abc, '': empty}" type="yaml"/>`,
+but you can only access it in roscpp/rospy as a full map directly.
 
 we actually do not set/load param via rosparam command,
 but aggregate them into a single param file using !include and !merge,
