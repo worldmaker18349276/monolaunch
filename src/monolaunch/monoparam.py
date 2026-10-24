@@ -335,16 +335,16 @@ class Include:
     context is designed for indicating that underlying resources are for which machine,
     so that resolver know how to deal with local resources for remote machine.  
     """
-    link: PathWithJPointer = field(default_factory=PathWithJPointer)
+    link: Union[PathWithJPointer, JPointer] = field(default_factory=JPointer)
     context: Tuple[Tuple[str, str], ...] = field(default_factory=lambda: ())
 
     @staticmethod
     def parse(link: str) -> "Include":
         link, context = (*link.rsplit("?", 1), "")[:2]
-        return Include(PathWithJPointer.parse(link), tuple(urllib.parse.parse_qsl(context)))
+        return Include(PathWithJPointer.parse_or_local(link), tuple(urllib.parse.parse_qsl(context)))
 
     def __str__(self) -> str:
-        link = str(self.link)
+        link = PathWithJPointer.format(self.link)
         # minimal query string encoding
         context = "&".join(
             urlquote(k, "?&=") + "=" + urlquote(v, "?&")
@@ -355,9 +355,9 @@ class Include:
         return link
 
     @staticmethod
-    def create(link: Union[str, Path, PathWithJPointer]) -> "Include":
+    def create(link: Union[str, Path, JPointer, PathWithJPointer]) -> "Include":
         if isinstance(link, str):
-            link = PathWithJPointer.parse(link)
+            link = PathWithJPointer.parse_or_local(link)
         elif isinstance(link, Path):
             link = PathWithJPointer(link)
         return Include(link, ())
@@ -993,10 +993,7 @@ class SchemaSource:
 
     def get_ref(self) -> Optional[Union[PathWithJPointer, JPointer]]:
         if isinstance(self.data, dict) and isinstance(ref := self.data.get("$ref", None), str):
-            if ref.startswith("#"):
-                return JPointer.parse(ref[1:])
-            else:
-                return PathWithJPointer.parse(ref) # TODO: our parsing order is different from the standard
+            return PathWithJPointer.parse_or_local(ref) # TODO: our parsing order is different from the standard
         return None
 
     def is_direct(self) -> bool:
@@ -1217,8 +1214,11 @@ class Source:
     def resolve_path(self, path: Path) -> Path:
         return (self.link.filepath.parent / path).resolve()
 
-    def resolve_link(self, link: PathWithJPointer) -> PathWithJPointer:
-        return PathWithJPointer(self.resolve_path(link.filepath), link.fieldpath)
+    def resolve_link(self, link: Union[PathWithJPointer, JPointer]) -> PathWithJPointer:
+        if isinstance(link, JPointer):
+            return PathWithJPointer(self.link.filepath, link)
+        else:
+            return PathWithJPointer(self.resolve_path(link.filepath), link.fieldpath)
 
     def resolve_resource(self, resource: Resource) -> Resource:
         """resolve file://relative_path, prepend context"""
@@ -1910,7 +1910,7 @@ class SourceLoader:
             SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning,
             FieldValueOverwriteWarning)
-    def include(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], value: Union[str, Path, PathWithJPointer], machine: str = ""):
+    def include(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], value: Union[str, Path, JPointer, PathWithJPointer], machine: str = ""):
         """
         insert include into sourced node.
         only the file of current top layer will be mutated.
@@ -1919,8 +1919,8 @@ class SourceLoader:
 
         <!> this may invalidate other sourced node.
         """
-        if not isinstance(value, (str, Path, PathWithJPointer)): # pyright: ignore[reportUnnecessaryIsInstance]
-            raise TypeError(value, (str, Path, PathWithJPointer))
+        if not isinstance(value, (str, Path, JPointer, PathWithJPointer)): # pyright: ignore[reportUnnecessaryIsInstance]
+            raise TypeError(value, (str, Path, JPointer, PathWithJPointer))
         include = Include.create(value)
         if machine:
             include = self.sync_resource_manager.attach_machine(include, machine)

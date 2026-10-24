@@ -456,6 +456,15 @@ class PathWithJPointer:
         fieldpath = urllib.parse.unquote(fieldpath)
         return cls(Path(filepath), JPointer.parse(fieldpath))
 
+    @classmethod
+    def parse_or_local(cls, file_field_path: str) -> Union["PathWithJPointer", JPointer]:
+        filepath, fieldpath = (*file_field_path.rsplit("#", 1), "")[:2]
+        fieldpath = urllib.parse.unquote(fieldpath)
+        if filepath:
+            return cls(Path(filepath), JPointer.parse(fieldpath))
+        else:
+            return JPointer.parse(fieldpath)
+
     def with_schema(self, schema: Union[None, str, Path, JSON] = None) -> "TypedPathWithJPointer":
         if schema is None:
             # any type
@@ -492,6 +501,13 @@ class PathWithJPointer:
             return f"{filepath}#{fieldpath}"
         else:
             return filepath
+
+    @staticmethod
+    def format(link: Union["PathWithJPointer", JPointer]) -> str:
+        if isinstance(link, PathWithJPointer):
+            return str(link)
+        else:
+            return "#" + urlquote(str(link), "#")
 
     def __repr__(self) -> str:
         return f"PathWithJPointer.parse({str(self)!r})"
@@ -602,7 +618,9 @@ def _include_constructor(loader: ExYAMLLoader, node: yaml.nodes.Node) -> TaggedJ
             node.start_mark,
         )
 
-    link = PathWithJPointer.parse(link)
+    link = PathWithJPointer.parse_or_local(link)
+    if isinstance(link, JPointer):
+        link = PathWithJPointer(loader.filepath, link)
 
     subfilepath = loader.filepath.parent / link.filepath
     with open(subfilepath, 'r') as f:
