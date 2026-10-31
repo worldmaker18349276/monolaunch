@@ -242,11 +242,10 @@ but you can only access it in roscpp/rospy as a full map directly.
 we actually do not set/load param via rosparam command,
 but aggregate them into a single param file using !include and !merge,
 them resolve it before launch.
-however, we don't collect set/load param inside included launch files.
-we load aggreated param at the end of generated launch file,
-so that you can overwrite parameters outside included launch files.
-that means set/load param only preserve order up to include.
-it's recommended to convert all your launch files into monolaunch scripts.
+for included launch files, we extract out parameters during the generation phase,
+and merge it into current aggregated param.
+we load aggregated param at the end of generated launch file,
+so that our parameters can be applied instead of overrided by include tags.
 
 <!-- TODO: finish it
 source yaml files, resolved yaml file and ros parameter server can be synchronized dynamically.

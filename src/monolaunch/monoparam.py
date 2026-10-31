@@ -1907,6 +1907,26 @@ class SourceLoader:
             warnings.warn(FieldValueOverwriteWarning(subnode.link, typ, "scalar"))
         source.data = value_
 
+    @raises(TypeError, ResolveErrorGroup,
+            IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
+            SchemaMetadataParseWarning,
+            FieldAccessWarning, SchemaFieldAccessWarning,
+            FieldValueOverwriteWarning)
+    def merge(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], value: JSON):
+        """
+        merge sourced node with given json.
+        only the file of current top layer will be mutated.
+
+        <!> this may invalidate other sourced node.
+        """
+        if not is_JSON(value):
+            raise TypeError(value, "JSON")
+
+        subnode = self._ensure_walk(node, fieldpath, True)
+
+        source = subnode.sources[-1]
+        source.data = cast(SourcedJSON, value)
+
     @raises(ResolveErrorGroup, TypeError,
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
             SchemaMetadataParseWarning,

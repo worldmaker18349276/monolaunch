@@ -19,6 +19,7 @@ import inspect
 import keyword
 import re
 import traceback
+from types import TracebackType
 import warnings
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, Generator, KeysView, List, Literal, Optional, Tuple, Sequence, Type, TypeVar, Union, cast, overload
@@ -51,15 +52,41 @@ __all__ = [
 # JSON + Path
 JSONWithPath = Union[None, JSON, Path, List["JSONWithPath"], Dict[str, "JSONWithPath"]]
 # JSON but only Path/PathWithJPointer as scalar
-JSONWithOnlyLink = Union[None, str, Path, PathWithJPointer, "TypedPathWithJPointer", List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
+JSONWithOnlyLink = Union[None, str, Path, PathWithJPointer, TypedPathWithJPointer, List["JSONWithOnlyLink"], Dict[str, "JSONWithOnlyLink"]]
 
 def parse_rosparam_path(path: str) -> Tuple[str, ...]:
     return tuple(e for e in path.strip("/").split("/") if e)
 
+def get_launch_params(launch_file: Path, args: Dict[str, Any], ns: str=""):
+    import roslaunch.config # pyright: ignore[reportMissingImports]
+    import roslaunch.xmlloader  # pyright: ignore[reportMissingImports]
+
+    config = roslaunch.config.ROSLaunchConfig() # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+    loader = roslaunch.xmlloader.XmlLoader() # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+
+    argv = [f"{k}:={v}" for k, v in args.items()]
+    if ns:
+        argv += [f"__ns:={ns}"]
+    loader.load(str(launch_file), config, argv=argv, verbose=False) # pyright: ignore[reportUnknownMemberType]
+
+    params_parent: Dict[str, JSON] = {"$": {}}
+    params_key: str = "$"
+    for k, v in config.params.items(): # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        path = parse_rosparam_path(cast(str, k))
+        parent: Dict[str, JSON] = params_parent
+        key: str = params_key
+        for e in path:
+            if not isinstance(parent.get(key), dict):
+                parent[key] = {}
+            parent = cast(Dict[str, JSON], parent[key])
+            key = e
+        parent[key] = cast(JSON, v.value) # pyright: ignore[reportUnknownMemberType]
+    return params_parent[params_key]
+
 @overload
 def JSONLike_deep_iter(folded_dict: JSONWithPath) -> Generator[Tuple[JsonPath, Union[JSONScalar, Path]], None, None]: ... # pyright: ignore[reportOverlappingOverload]
 @overload
-def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JsonPath, Union[str, Path, PathWithJPointer, "TypedPathWithJPointer"]], None, None]: ...
+def JSONLike_deep_iter(folded_dict: JSONWithOnlyLink) -> Generator[Tuple[JsonPath, Union[str, Path, PathWithJPointer, TypedPathWithJPointer]], None, None]: ...
 def JSONLike_deep_iter(folded_dict: JSON) -> Generator[Tuple[JsonPath, JSONScalar], None, None]: # pyright: ignore[reportInconsistentOverload]
     stack: List[Tuple[JsonPath, JSON]] = [((), folded_dict)]
     while stack:
@@ -164,6 +191,7 @@ class Ctx:
     scopes: List[Scope] = field(default_factory=lambda: [])
     param_loader: SourceLoader = field(default_factory=SourceLoader)
     param_node: Optional[SourcedNode] = None
+    param_include_state: bool = False
     # node_name -> node, include_index -> include
     nodes: Dict[Union[str, int], Union["Node", "Include"]] = field(default_factory=lambda: {})
     machines: Dict[str, "MachineCtx"] = field(default_factory=lambda: {})
@@ -255,26 +283,30 @@ class Ctx:
         if self.param_node is None:
             self.param_node = self.param_loader.new(self.params_filepath)
         assert self.param_node is not None
+        if self.param_include_state:
+            self.param_loader.merge(self.param_node, (), {})
+            self.param_include_state = False
         if is_load:
             for path, value in JSONLike_deep_iter(cast(JSONWithOnlyLink, param)):
-                if isinstance(value, (str, Path)):
-                    inc_path = Path(value)
-                elif isinstance(value, TypedPathWithJPointer):
-                    inc_path = value.filepath
-                elif isinstance(value, PathWithJPointer): # pyright: ignore[reportUnnecessaryIsInstance]
-                    inc_path = value.filepath
-                else:
+                if not isinstance(value, (str, Path, TypedPathWithJPointer, PathWithJPointer)): # pyright: ignore[reportUnnecessaryIsInstance]
                     raise TypeError(f"load_param dictionary should contain yaml file path to include, but got {value}")
-                if not inc_path.is_absolute():
-                    raise FilePathNotAbsoluteError(inc_path)
-
+                value_ = TypedPathWithJPointer.create(value)
+                if not value_.filepath.is_absolute():
+                    raise FilePathNotAbsoluteError(value_.filepath)
                 if check:
                     # get_value for type checking
-                    self.get_value(TypedPathWithJPointer.create(value), allow_attrs=False)
+                    self.get_value(value_, allow_attrs=False)
                 self.param_loader.include(self.param_node, path, value, str(machine))
         else:
             for path, value in JSONLike_deep_iter(cast(JSONWithPath, param)):
                 self.param_loader.update(self.param_node, path, value, str(machine))
+
+    def set_included_params(self, included_params: JSON):
+        if self.param_node is None:
+            self.param_node = self.param_loader.new(self.params_filepath)
+        assert self.param_node is not None
+        self.param_loader.merge(self.param_node, (), included_params)
+        self.param_include_state = True
 
     # TODO: resolve !resource -> Path
     def get_value(self, link: TypedPathWithJPointer, allow_attrs: bool = True) -> JSON:
@@ -457,10 +489,20 @@ class Include:
         ctx().push_group((), False)
         return self
 
-    def __exit__(self, *_):
-        self.env = ctx().get_env()
-        self.remap = ctx().get_remap()
-        ctx().pop_group()
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> Optional[bool]:
+        if exc_type is None:
+            self.env = ctx().get_env()
+            self.remap = ctx().get_remap()
+            ctx().set_included_params(self.get_params())
+            ctx().pop_group()
+
+    def get_params(self) -> JSON:
+        return get_launch_params(Path(self.file), self.args, ns=_join_ns(self.ns))
 
     def to_xml(self, machine_xml: ET.Element) -> ET.Element:
         el_ = ET.Element("group")
@@ -522,13 +564,19 @@ class Node:
         ctx().push_group((self.name,), True)
         return self
 
-    def __exit__(self, *_):
-        self.env = ctx().get_env()
-        self.remap = ctx().get_remap()
-        self.has_logger = ctx().assign_logger()
-        if self.has_logger:
-            self.launch_prefix = ("rosrun", "monolaunch", "setup_logger.py") + self.launch_prefix
-        ctx().pop_group()
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> Optional[bool]:
+        if exc_type is None:
+            self.env = ctx().get_env()
+            self.remap = ctx().get_remap()
+            self.has_logger = ctx().assign_logger()
+            if self.has_logger:
+                self.launch_prefix = ("rosrun", "monolaunch", "setup_logger.py") + self.launch_prefix
+            ctx().pop_group()
 
     def to_xml(self) -> ET.Element:
         attrs: Dict[str, str] = {}
@@ -575,8 +623,14 @@ class Master:
         ctx().push_group((), False)
         return self
 
-    def __exit__(self, *_):
-        ctx().pop_group()
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> Optional[bool]:
+        if exc_type is None:
+            ctx().pop_group()
 
     def to_xml(self) -> ET.Element:
         attrs: Dict[str, str] = {}
@@ -602,8 +656,14 @@ class MachineCtx:
             raise _Regenerate(ctx().default_machine.machine)
         return self
 
-    def __exit__(self, *_):
-        ctx().pop_group()
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> Optional[bool]:
+        if exc_type is None:
+            ctx().pop_group()
 
     @staticmethod
     def parse(url: str) -> "MachineCtx":
@@ -638,8 +698,14 @@ class Group:
         ctx().push_group(self.ns)
         return self
 
-    def __exit__(self, *_):
-        ctx().pop_group()
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> Optional[bool]:
+        if exc_type is None:
+            ctx().pop_group()
 
 # -- public helpers ------------------------------------------------------------
 
