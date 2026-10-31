@@ -42,6 +42,7 @@ from typing import Any, Dict, Generator, List, Literal, Tuple, Set, Union, Optio
 import sys
 import math
 import yaml
+import time
 import xml.etree.ElementTree as ET
 import urllib.parse
 from pathlib import Path
@@ -537,7 +538,15 @@ class ResolveErrorGroup(ResolveError):
         self.errors = list(errors)
 
     def __str__(self):
-        return f"fail to resolve ({len(self.errors)} errors)\n" +  "\n".join(str(e) for e in self.errors)
+        return f"fail to resolve ({len(self.errors)} errors)\n" + "\n".join(str(e) for e in self.errors)
+
+    def format_full(self):
+        import traceback
+        parts = [f"fail to resolve ({len(self.errors)} errors)"]
+        for i, e in enumerate(self.errors, 1):
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            parts.append(f"--- error {i}/{len(self.errors)} ---\n{tb}")
+        return "\n".join(parts)
 
     @contextlib.contextmanager
     def collect(self):
@@ -717,7 +726,7 @@ class SyncFileNotReadyWarning(YAMLSynchronizerWarning):
         return f"{self.which} yaml file is not ready"
 
 class UnsupportedDeletionSynchronizationWarning(YAMLSynchronizerWarning):
-    def __init__(self, fieldpath: JPointer):
+    def __init__(self, fieldpath: JsonPath):
         self.fieldpath = fieldpath
     
     def __str__(self):
@@ -1459,7 +1468,7 @@ class SourceLoader:
     @raises(ResolveLinkError, SchemaMetadataParseWarning)
     def _resolve_indirect_schema(self, schema: SchemaSource, node_link: PathWithJPointer) -> Tuple[SchemaSource, Optional[Source], Set[Path]]:
         depends: Set[Path] = set()
-        visited: Set[PathWithJPointer] = set()
+        ban: Set[PathWithJPointer] = set()
         default: Optional[Source] = None
         while True:
             try:
@@ -1473,10 +1482,10 @@ class SourceLoader:
                 ref = schema.get_ref()
                 if ref is not None:
                     ref = schema.resolve_link(ref)
-                    if ref in visited:
+                    if ref in ban:
                         # loop
                         raise SchemaSelfReferencedError(ref)
-                    visited.add(ref)
+                    ban.add(ref)
                     depends.add(ref.filepath)
 
                     schema_ = self._load_schema(ref.filepath)
@@ -1495,61 +1504,54 @@ class SourceLoader:
         return schema, default, depends
 
     @raises(ResolveErrorGroup)
-    def _resolve_indirect_source(self, source: Source, node_link: PathWithJPointer) -> Tuple[List[Source], Set[Path]]:
-        visited: Set[PathWithJPointer] = set()
+    def _resolve_indirect_source(self, source: Source, node_link: PathWithJPointer, ban: Set[PathWithJPointer]) -> Tuple[List[Source], Set[Path]]:
         outputs: List[Source] = []
         depends: Set[Path] = set()
-        inputs = [(source, JPointer())]
         error = ResolveErrorGroup([])
-        while inputs:
-            source, fieldpath = inputs.pop()
-            data = source.data
+        data = source.data
 
-            with error.collect():
-                try:
-                    if isinstance(data, Include):
-                        link = source.resolve_link(data.link)
-                        if link in visited:
-                            # loop
-                            raise SourceSelfReferencedError(link)
-                        visited.add(link)
-                        depends.add(link.filepath)
+        with error.collect():
+            try:
+                if isinstance(data, Include):
+                    link = source.resolve_link(data.link)
+                    if link in ban:
+                        # loop
+                        raise SourceSelfReferencedError(link)
+                    ban = set(ban)
+                    ban.add(link)
+                    depends.add(link.filepath)
 
-                        # try
-                        source_include = self._load_source(link.filepath, source.context + data.context)
-                        
-                        inputs.append((source_include, link.fieldpath.extend(fieldpath)))
-                        continue
+                    source_include = self._load_source(link.filepath, source.context + data.context)
+                    included_node = SourcedNode(PathWithJPointer(link.filepath), [source_include], None, None)
 
-                    if isinstance(data, Merge):
-                        for i in range(len(data.items))[::-1]:
-                            source_i = Source(source.link.append(i), data.items, i, source.context)
-                            inputs.append((source_i, fieldpath))
-                        continue
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("error", FieldAccessWarning)
+                            included_node, depends_ = self.walk_(included_node, link.fieldpath, ban)
+                    except FieldAccessWarning as e:
+                        raise SourceIncludeFieldAccessError(e.link, e.key)
 
-                    if not fieldpath:
-                        outputs.append(source)
-                        continue
+                    assert included_node is not None
+                    depends.update(depends_)
+                    
+                    for source in included_node.sources:
+                        outputs_, depends_ = self._resolve_indirect_source(source, node_link, ban)
+                        outputs.extend(outputs_)
+                        depends.update(depends_)
 
-                    key = fieldpath.elements[0]
-                    fieldpath = fieldpath[1:]
+                elif isinstance(data, Merge):
+                    for i in range(len(data.items))[::-1]:
+                        source_i = Source(source.link.append(i), data.items, i, source.context)
+                        outputs_, depends_ = self._resolve_indirect_source(source_i, node_link, ban)
+                        depends_.update(depends_)
+                        outputs.extend(outputs_)
+                    outputs = list(reversed(outputs))
 
-                    if isinstance(data, dict):
-                        if key not in data:
-                            raise SourceIncludeFieldAccessError(source.link, key)
-                    elif isinstance(data, list):
-                        if not JPointer.is_index(key) or int(key) >= len(data):
-                            raise SourceIncludeFieldAccessError(source.link, key)
-                        key = int(key)
-                    else:
-                        raise SourceIncludeFieldAccessError(source.link, key)
+                else:
+                    outputs.append(source)
 
-                    source_key = Source(source.link.append(key), data, key, source.context)
-                    inputs.append((source_key, fieldpath))
-                    continue
-
-                except (SourceLoadError, SourceSelfReferencedError, SourceIncludeFieldAccessError) as e:
-                    raise ResolveLinkError(node_link) from e
+            except (SourceLoadError, SourceSelfReferencedError, SourceIncludeFieldAccessError) as e:
+                raise ResolveLinkError(node_link) from e
 
         if error.errors:
             raise error
@@ -1559,14 +1561,14 @@ class SourceLoader:
     @raises(ResolveErrorGroup, SchemaMetadataParseWarning)
     # SchemaLoadError, SchemaRefLoopError, SchemaRefFieldAccessError,
     # SourceLoadError, SourceRefLoopError, SourceIncludeFieldAccessError
-    def resolve_indirect_(self, node: SourcedNode) -> Tuple[SourcedNode, Set[Path]]:
+    def resolve_indirect_(self, node: SourcedNode, ban: Set[PathWithJPointer]) -> Tuple[SourcedNode, Set[Path]]:
         depends: Set[Path] = set()
         sources: List[Source] = []
         default = node.default
         error = ResolveErrorGroup([])
         for source in node.sources:
             with error.collect():
-                sources_, depends_ = self._resolve_indirect_source(source, node.link)
+                sources_, depends_ = self._resolve_indirect_source(source, node.link, ban)
                 sources.extend(sources_)
                 depends.update(depends_)
 
@@ -1647,12 +1649,12 @@ class SourceLoader:
             IncompatibleMergeWarning, SchemaUnknownTypeWarning, SchemaTypeMismatchWarning,
             SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning)
-    def walk_(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath]) -> Tuple[Optional[SourcedNode], Set[Path]]:
+    def walk_(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath], ban: Set[PathWithJPointer]) -> Tuple[Optional[SourcedNode], Set[Path]]:
         depends: Set[Path] = set()
         is_untyped_key = isinstance(fieldpath, JPointer)
         elements = fieldpath.elements if isinstance(fieldpath, JPointer) else fieldpath
         for key in elements:
-            node, depends_ = self.resolve_indirect_(node)
+            node, depends_ = self.resolve_indirect_(node, ban)
             depends.update(depends_)
 
             type_keys = node.access()
@@ -1669,7 +1671,7 @@ class SourceLoader:
             SchemaMetadataParseWarning,
             FieldAccessWarning, SchemaFieldAccessWarning)
     def walk(self, node: SourcedNode, fieldpath: Union[JPointer, JsonPath]) -> Optional[SourcedNode]:
-        return self.walk_(node, fieldpath)[0]
+        return self.walk_(node, fieldpath, set())[0]
 
     @raises(SourceLoadError)
     def load(self, src: Path) -> SourcedNode:
@@ -1715,7 +1717,7 @@ class SourceLoader:
         the subnodes failed to resolve will be assigned to null.
         if sync_resources is not None, resource URI will be rewritten and collected into sync_resources.
         """
-        node, depends = self.resolve_indirect_(node)
+        node, depends = self.resolve_indirect_(node, set())
 
         root: Dict[str, JSON] = {}
         stack: List[Tuple[SourcedNode, Callable[[JSON], None]]]
@@ -1732,7 +1734,7 @@ class SourceLoader:
                     with error.collect():
                         subnode = self._get(node, type_keys, is_default, key_)
                         assert subnode is not None
-                        subnode, depends_ = self.resolve_indirect_(subnode)
+                        subnode, depends_ = self.resolve_indirect_(subnode, set())
                         depends.update(depends_)
                         stack.append((subnode, lambda value, res_=res_, key_=key_: res_.__setitem__(key_, value)))
                 set_value(res_)
@@ -1743,7 +1745,7 @@ class SourceLoader:
                     with error.collect():
                         subnode = self._get(node, type_keys, is_default, str(key_))
                         assert subnode is not None
-                        subnode, depends_ = self.resolve_indirect_(subnode)
+                        subnode, depends_ = self.resolve_indirect_(subnode, set())
                         depends.update(depends_)
                         stack.append((subnode, lambda value, res_=res_, key_=key_: res_.__setitem__(slice(key_, key_), [value])))
                 set_value(res_)
@@ -1854,7 +1856,7 @@ class SourceLoader:
         elements = fieldpath.elements if isinstance(fieldpath, JPointer) else fieldpath
         for key in elements:
             self._ensure_top(node, False)
-            node, _depends = self.resolve_indirect_(node)
+            node, _depends = self.resolve_indirect_(node, set())
 
             typ = node.access()[0]
             if typ == "seq":
@@ -1870,7 +1872,7 @@ class SourceLoader:
             node = node_
 
         self._ensure_top(node, ensure_null)
-        node, _depends = self.resolve_indirect_(node)
+        node, _depends = self.resolve_indirect_(node, set())
         if ensure_null:
             assert node.sources[-1].data is None
         return node
@@ -2245,16 +2247,16 @@ class YAMLSynchronizer:
                 if (sourced_node := self.original.loader.all_includes.get(depend, ABSENCE_VALUE)) is not ABSENCE_VALUE
             }
 
-            update: Dict[JPointer, Union[JSONScalar, Path]] = {}
-            for key, value in resolved_diff.items():
+            update: Dict[JsonPath, Union[JSONScalar, Path]] = {}
+            for path, value in resolved_diff.items():
                 if value is None:
                     # TODO: try to delete standalone (not-merged) field
-                    warnings.warn(UnsupportedDeletionSynchronizationWarning(key))
+                    warnings.warn(UnsupportedDeletionSynchronizationWarning(path))
                 else:
-                    update[key] = cast(JSONScalar, value)
+                    update[path] = cast(JSONScalar, value)
             assert self.original.node is not None
-            for key, value in update.items():
-                self.original.loader.update(self.original.node, key, value)
+            for path, value in update.items():
+                self.original.loader.update(self.original.node, path, value)
 
             for depend in old_original_sources.keys():
                 old = old_original_sources[depend]
@@ -2306,7 +2308,6 @@ class YAMLSynchronizer:
             ManualSyncResourceWarning, SyncResourceUnknownRuntimeWarning, SyncResourceSourceNotAbsoluteWarning,
             RootIsNotMapWarning, SyncFileNotReadyWarning)
     def spin(self, dt: float = 0.1):
-        import time
         status = ""
         while True:
             self.spin_once()
@@ -2400,39 +2401,42 @@ def to_resolved(source_path: Union[str, Path, PathWithJPointer, PathWithXPointer
     """
     
     source_path = parse_jpointer_or_xpointer(source_path)
-    parent = source_path.filepath.parent
-    stem = source_path.filepath.stem
 
     if isinstance(source_path, PathWithXPointer):
-        extracted_path = parent / f"{stem}.extracted.yaml"
+        extracted_path = source_path.filepath.parent / f"{source_path.filepath.stem}.extracted.yaml"
         print(f"yaml is embeded in a xml, extract into {extracted_path}", file=sys.stderr)
         elem = source_path.get()
         if elem is None:
             raise ValueError(f"fail to read embeded param: {source_path}")
-        extracted_path.write_text(elem.text or "")
+        extracted_path.write_text(f"# $source: {source_path}\n" + (elem.text or ""))
         source_path = PathWithJPointer(extracted_path)
 
     if source_path.fieldpath:
-        extracted_path = parent / f"{stem}.extracted.yaml"
+        extracted_path = source_path.filepath.parent / f"{source_path.filepath.stem}.extracted.yaml"
         print(f"only a portion of yaml need to be resolved, extract into {extracted_path}", file=sys.stderr)
         raw_source_json = load_ExYAML(source_path, True)
         raw_source_str = yaml.dump(raw_source_json, Dumper=ExYAMLDumper, sort_keys=False)
-        extracted_path.write_text(raw_source_str)
+        extracted_path.write_text(f"# $source: {source_path}\n" + raw_source_str)
         source_path = PathWithJPointer(extracted_path)
 
     source_path = source_path.filepath
 
-    resolved_path = parent / f"{stem}.resolved.yaml"
+    resolved_path = source_path.parent / f"{source_path.stem}.resolved.yaml"
     print(f"resolve {source_path} -> {resolved_path}", file=sys.stderr)
-    if resolved_path.exists():
-        resolved_path.unlink()
-    resolved_path.touch()
-    sync = YAMLSynchronizer(source_path, resolved_path)
-    sync.skip_empty = skip_empty
-    sync.aggregate_sync_resources = aggregate_sync_resources
-    sync.attach_metadata = True
-    sync.init()
-    sync.resolve()
+
+    original = YAMLWatcher(source_path)
+    original.metadata = {
+        "$monoparam_source": str(source_path),
+        "$monoparam_resolved": str(resolved_path),
+    }
+    original.load(skip_empty, aggregate_sync_resources, True)
+
+    if original.data is None:
+        return ""
+
+    resolved = YAMLWatcher(resolved_path)
+    resolved.loader.all_includes[resolved.path] = cast(SourcedJSON, original.data)
+    resolved.save(resolved.path)
 
     return str(resolved_path)
 

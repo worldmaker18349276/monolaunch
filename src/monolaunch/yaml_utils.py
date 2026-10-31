@@ -94,6 +94,7 @@ __all__ = [
 
 JSONScalar = Union[bool, int, float, str] # int, float are different, nan, inf are allowed
 JSON = Union[None, JSONScalar, List["JSON"], Dict[str, "JSON"]]
+JsonPath = Sequence[Union[int, str]]
 
 @dataclass(frozen=True)
 class TaggedScalar:
@@ -174,7 +175,7 @@ def deep_update(base: JSON, update: JSON) -> JSON:
 
     return deep_copy(update)
 
-def _deep_merge(path: "JPointer", base: JSON, update: JSON) -> Tuple[JSON, List["JPointer"]]:
+def _deep_merge(path: JsonPath, base: JSON, update: JSON) -> Tuple[JSON, List[JsonPath]]:
     # skip null
     if base is not None and update is None:
         return base, []
@@ -187,23 +188,23 @@ def _deep_merge(path: "JPointer", base: JSON, update: JSON) -> Tuple[JSON, List[
 
     if isinstance(base, dict):
         assert isinstance(update, dict)
-        inconsistencies: List[JPointer] = []
+        inconsistencies: List[JsonPath] = []
         for k, v in update.items():
-            v, a = _deep_merge(path.append(k), base.get(k), v)
+            v, a = _deep_merge((*path, k), base.get(k), v)
             base[k] = v
             inconsistencies.extend(a)
         return base, inconsistencies
 
     if isinstance(base, list):
         assert isinstance(update, list)
-        inconsistencies: List[JPointer] = []
+        inconsistencies: List[JsonPath] = []
         # zip longest
         if len(base) < len(update):
             base.extend([None]*(len(update) - len(base)))
         elif len(base) > len(update):
             update = [*update, *[None]*(len(base) - len(update))]
         for i in range(len(base)):
-            v, a = _deep_merge(path.append(i), base[i], update[i])
+            v, a = _deep_merge((*path, i), base[i], update[i])
             base[i] = v
             inconsistencies.extend(a)
         return base, inconsistencies
@@ -213,12 +214,12 @@ def _deep_merge(path: "JPointer", base: JSON, update: JSON) -> Tuple[JSON, List[
 
     return base, [path]
 
-def deep_merge(base: JSON, update: JSON) -> Tuple[JSON, List["JPointer"]]:
+def deep_merge(base: JSON, update: JSON) -> Tuple[JSON, List[JsonPath]]:
     """
     merge base by copying update, returns merged base and inconsistent paths.
-    unlike deep_update, different values at the same field will not be overrided, and warnings will be raised.
+    unlike deep_update, different values at the same field will not be overrided.
     """
-    return _deep_merge(JPointer(), base, update)
+    return _deep_merge((), base, update)
 
 def deep_eq(lhs: JSON, rhs: JSON) -> bool:
     """
@@ -256,15 +257,15 @@ def deep_eq(lhs: JSON, rhs: JSON) -> bool:
 
     return True
 
-def deep_diff(old: JSON, new: JSON) -> Dict["JPointer", Optional[JSON]]:
+def deep_diff(old: JSON, new: JSON) -> Dict[JsonPath, Optional[JSON]]:
     """
     diff in the scalar level.
     null is treated as empty slot.
     returns map from paths to: scalars for updating values, or maps/seqs for changing types, or None for deletion.
     """
-    updated: Dict[JPointer, Optional[JSON]] = {}
+    updated: Dict[JsonPath, Optional[JSON]] = {}
 
-    stack: List[Tuple[JPointer, JSON, JSON]] = [(JPointer(), old, new)]
+    stack: List[Tuple[JsonPath, JSON, JSON]] = [((), old, new)]
     while stack:
         path, a, b = stack.pop()
 
@@ -276,23 +277,23 @@ def deep_diff(old: JSON, new: JSON) -> Dict["JPointer", Optional[JSON]]:
             assert isinstance(b, dict)
             for k in a.keys():
                 if k not in b:
-                    updated[path.append(k)] = None
+                    updated[(*path, k)] = None
             for k in b.keys():
                 if k not in a:
-                    updated[path.append(k)] = b[k]
+                    updated[(*path, k)] = b[k]
                 else:
-                    stack.append((path.append(k), a[k], b[k]))
+                    stack.append(((*path, k), a[k], b[k]))
             continue
 
         if isinstance(a, list):
             assert isinstance(b, list)
             for i in range(len(b)):
                 if i < len(a):
-                    stack.append((path.append(i), a[i], b[i]))
+                    stack.append(((*path, i), a[i], b[i]))
                 else:
-                    updated[path.append(i)] = b[i]
+                    updated[(*path, i)] = b[i]
             for i in range(len(b), len(a)):
-                updated[path.append(i)] = None
+                updated[(*path, i)] = None
             continue
 
         # scalar
@@ -302,19 +303,19 @@ def deep_diff(old: JSON, new: JSON) -> Dict["JPointer", Optional[JSON]]:
 
     return updated
 
-def deep_iter(obj: JSON) -> Generator[Tuple["JPointer", JSONScalar], None, None]:
+def deep_iter(obj: JSON) -> Generator[Tuple[JsonPath, JSONScalar], None, None]:
     """
     traverse into dict/list until scalar, skip null, yield path and scalar.
     """
-    stack = [(JPointer(), obj)]
+    stack: List[Tuple[JsonPath, JSON]] = [((), obj)]
     while stack:
         path, value = stack.pop()
         if isinstance(value, dict):
             for key in list(value.keys()):
-                stack.append((path.append(key), value[key]))
+                stack.append(((*path, key), value[key]))
         elif isinstance(value, list):
             for key in range(len(value)):
-                stack.append((path.append(key), value[key]))
+                stack.append(((*path, key), value[key]))
         elif value is None:
             # skip None
             pass
@@ -347,8 +348,6 @@ def urlquote(s: str, unsafe: str = r"#@/:;?") -> str:
         lambda m: ''.join(f"%{b:02X}" for b in m.group(0).encode("utf-8")),
         s,
     )
-
-JsonPath = Sequence[Union[int, str]]
 
 @dataclass(frozen=True)
 class JPointer:
