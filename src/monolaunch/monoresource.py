@@ -18,6 +18,7 @@ from pathlib import Path
 import socket
 import json
 import tempfile
+from datetime import datetime
 
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, cast
 import urllib.parse
@@ -528,7 +529,56 @@ def _get_machines_from_launch(launch_file: Path) -> Dict[str, Machine]:
         )
     return machines
 
-def sync_latest_logs(launch_file: str):
+def _log_dir_start_time(log_dir: Path) -> float:
+    """
+    Start time of a run, taken from the first line of the earliest roslaunch log
+    (e.g. `[roslaunch][INFO] 2026-11-04 15:34:46,571: ...`), because the directory
+    mtime changes whenever its content is modified. Falls back to 0 if unparsable.
+    """
+    ts_re = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}")
+    times: List[float] = []
+    for f in log_dir.glob("roslaunch-*.log"):
+        try:
+            with open(f, errors="replace") as fp:
+                for _ in range(20):  # timestamp is in one of the first lines
+                    m = ts_re.search(fp.readline())
+                    if m:
+                        times.append(datetime.strptime(m.group(), "%Y-%m-%d %H:%M:%S,%f").timestamp())
+                        break
+        except OSError:
+            pass
+    return min(times) if times else 0.0
+
+def find_log_dir(launch_file: str, last_nth_zero_based: int):
+    machines = _get_machines_from_launch(Path(launch_file))
+
+    by_machine: Dict[Machine, List[str]] = {}
+    for machine_name, machine in machines.items():
+        machine = machine.reduce_local()
+        by_machine.setdefault(machine, []).append(machine_name)
+
+    logs_dir = remote_expandvars(machines["local"], "${ROS_LOG_DIR}")
+
+    if last_nth_zero_based < 0:
+        raise ValueError(f"last_nth_zero_based must be >= 0, got {last_nth_zero_based}")
+
+    uuid_re = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+    # only real run directories (skip the "latest" symlink and "<uuid>-<machine>" sync dirs)
+    candidates = [
+        p for p in Path(logs_dir).iterdir()
+        if uuid_re.match(p.name) and p.is_dir() and not p.is_symlink()
+    ]
+    candidates.sort(key=_log_dir_start_time, reverse=True)
+
+    if last_nth_zero_based >= len(candidates):
+        raise ValueError(
+            f"Cannot find the {last_nth_zero_based}-th last log dir in {logs_dir}: "
+            f"only {len(candidates)} found"
+        )
+    log_dir = candidates[last_nth_zero_based].resolve()
+    return log_dir
+
+def sync_logs(launch_file: str, uuid: str = "latest"):
     machines = _get_machines_from_launch(Path(launch_file))
 
     by_machine: Dict[Machine, List[str]] = {}
@@ -537,7 +587,7 @@ def sync_latest_logs(launch_file: str):
         by_machine.setdefault(machine, []).append(machine_name)
 
     local_log_dir = remote_expandvars(machines["local"], "${ROS_LOG_DIR}")
-    local_log_dir = (Path(local_log_dir) / "latest").resolve()
+    local_log_dir = (Path(local_log_dir) / uuid).resolve()
     local_log_dir.mkdir(exist_ok=True)
 
     with ssh_multiplexing():
@@ -558,7 +608,7 @@ def sync_latest_logs(launch_file: str):
             if not path.exists():
                 path.symlink_to(link, True)
 
-__all__ = ["sync", "run_remote_task", "sync_latest_logs"]
+__all__ = ["sync", "run_remote_task", "find_log_dir", "sync_logs"]
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
