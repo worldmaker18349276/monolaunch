@@ -682,37 +682,48 @@ the advantages of this design are obvious:
     which is not an issue that users should care about.
   - redistribution makes single source of truth possible.
 
-based on purposes, configurations can be categorized into:
-- calibration data:  
-  the calibration of sensors, such as intrinsics/extrinsics of stereo camera, imu-cam extrinsics,
-  should remain unchanged unless the mechanical structures or internal components change.
-  also calibration data are usually produced by another program,
-  which should be managed in a separated directory,
-  instead of manually copying into your configuration file.
-- algorithm parameters:  
-  algorithms typically contain many parameters (such as PID, resolution, fps, etc)
-  that need to be adjusted depending on the specific circumstances.
-  tuning parameters often require some relevant knowledge, which frontend users cannot master.
-  you also don't want to touch it once it's tuned to the optimal state.
-  separating them from other configurations can also hide their complexity.
-  aside from their purposes, the algorithm parameters are similar to calibration data;
-  the main difference is whether there is a systematic method to determining these parameters.
-- feature settings:  
-  these are about general settings of features, such as use which algorithm,
-  connect to which sensors, frame ID name, publish to which topics,
-  delay time of some operations, etc.
-  they usually can be configured by strings or integers, which are easy to adjust for frontend users.
-- environment settings:  
-  some configurations are necessarily related to the machine/device you are using,
-  and cannot be ported to the same application on different machines.
-  such as network/authentication settings, sensor's device ID, buildspace path, etc.
-  configurations are tightly related to your programs,
-  so that they should be managed in the same repository,
-  at least a default/example configuration should be stored in the repository.
-  in this sense, environment settings are not suitable be included,
-  since it contains unportable and sensitive information.
-  so it must be stored outside of your configuration folders.
-
+based on dependency and purpose, configurations can be categorized into three kinds:
+- **software configurations:**  
+  those are basically portable values, and are only related to the program you run.
+  - **algorithm parameters:**  
+    algorithms typically contain many parameters (such as gain, resolution, fps, etc)
+    that need to be adjusted depending on the specific circumstances.
+    tunning parameters often require some relevant knowledge, which frontend users cannot master.
+    you also don't want to touch it once it's tunned to the optimal state.
+    separating them from other configurations can also hide their complexity.
+  - **feature settings:**  
+    these are about general settings of features, such as: use which algorithm,
+    connect to which sensors, frame ID/topic names, delay time of some operations, etc.
+    they usually can be configured by strings or integers, which are easy to adjust for frontend users.
+    note that frame ID can be decided by user, but the links between them should be the same up to naming.
+- **hardware configurations:**  
+  those depend on the hardware the program run on.
+  - **environment settings:**  
+    the environment setup for the machine to run the program need to be configured.
+    such as network settings, credentials, buildspace path, etc.
+    it is recommended that setup credentials or sensitive settings in the system level,
+    monoparam often store resolved parameters somewhere, which is dangerous for password.
+  - **device-related parameters:**  
+    different devices may have different parameters to configure,
+    such as device id and FCU parameters, etc.
+    highly device-related configurations are also counted.
+    PID tunning parameters can be seen as algorithm parameters,
+    but they highly depend on the mechanical structure of device,
+    so they are counted as FCU parameters.
+  - **calibration results:**  
+    the calibration of sensors, such as intrinsics/extrinsics of stereo camera, imu-cam extrinsics,
+    should remain unchanged unless the mechanical structures or internal components change.
+    also calibration data are usually produced by another program,
+    which should be managed in a separated directory,
+    instead of manually copying into your configuration file.
+    another similar one is virtual camera configuration,
+    it is not directly tight to, but highly depend on, the arrangement of cameras,
+    so it is considered as hardware configurations.
+- **operational configuration:**  
+  those are constantly changing data, should not commit to repo, rarely use.
+  there are: runtime data and configuration changes on the fly, etc.
+  some debug operations, like logging options, bag recording, injected script,
+  don't need to be managed, they should be cleaned up immediatedly after test.
 
 ## Merge
 `!merge` should be followed by the sequence of objects to be merged.
