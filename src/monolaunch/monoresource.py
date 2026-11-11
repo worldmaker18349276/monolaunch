@@ -29,7 +29,7 @@ IP_REGEX = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
 def get_local_addresses() -> List[str]:
     import rosgraph.network
-    return rosgraph.network.get_local_addresses()
+    return rosgraph.network.get_local_addresses() # pyright: ignore[reportReturnType, reportUnknownVariableType]
 
 def getuser() -> str:
     import getpass

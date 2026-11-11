@@ -331,7 +331,7 @@ class Ctx:
             warnings.simplefilter("error", FieldAccessWarning)
             tmp_param_node = self.param_loader.walk(tmp_param_node, fieldpath)
             assert tmp_param_node is not None
-            tmp_param_node = self.param_loader.resolve_indirect_(tmp_param_node)[0]
+            tmp_param_node = self.param_loader.resolve_indirect_(tmp_param_node, set())[0]
         type_keys = tmp_param_node.access()
         if attr == "__class__":
             if type_keys[0] == "null":
