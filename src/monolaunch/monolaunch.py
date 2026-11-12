@@ -1093,6 +1093,15 @@ def generate(launch_func: Callable[[], None], launch_filepath: Path, need_regen:
         # add <master>, <node> and <include>
         if master := ctx().master:
             launch_el.append(master.to_xml())
+
+        # save resolved files to log dir
+        launch_el.append(ET.Element("node", {
+            "name": "$(anon save_resolved)",
+            "pkg": "monolaunch",
+            "type": "save_resolved.py",
+            "args": "$(arg filename) $(arg resolved_param) --",
+        }))
+
         for node in list(ctx().nodes.values()):
             if isinstance(node, Node):
                 launch_el.append(node.to_xml())
