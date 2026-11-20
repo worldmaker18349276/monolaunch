@@ -1165,7 +1165,7 @@ def _launch(launch_func: Callable[[], None]) -> Callable[[], None]:
     launch_filepath = Path.cwd() / f"{launch_func.__name__}.launch"
 
     if dry_run == -1:
-        cmd = ("rosrun", "monolaunch", "sync_latest_logs.py", str(launch_filepath))
+        cmd = ("rosrun", "monolaunch", "sync_latest_logs.py", "--launch", str(launch_filepath))
         print("synchronize latest logs because --dry-run=-1:\n" + shlex.join(cmd))
         return lambda: os.execvp(cmd[0], cmd)
 

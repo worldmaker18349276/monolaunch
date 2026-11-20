@@ -549,23 +549,14 @@ def _log_dir_start_time(log_dir: Path) -> float:
             pass
     return min(times) if times else 0.0
 
-def find_log_dir(launch_file: str, last_nth_zero_based: int):
-    machines = _get_machines_from_launch(Path(launch_file))
-
-    by_machine: Dict[Machine, List[str]] = {}
-    for machine_name, machine in machines.items():
-        machine = machine.reduce_local()
-        by_machine.setdefault(machine, []).append(machine_name)
-
-    logs_dir = remote_expandvars(machines["local"], "${ROS_LOG_DIR}")
-
+def find_log_dir(logs_dir: Path, last_nth_zero_based: int):
     if last_nth_zero_based < 0:
         raise ValueError(f"last_nth_zero_based must be >= 0, got {last_nth_zero_based}")
 
     uuid_re = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
     # only real run directories (skip the "latest" symlink and "<uuid>-<machine>" sync dirs)
     candidates = [
-        p for p in Path(logs_dir).iterdir()
+        p for p in logs_dir.iterdir()
         if uuid_re.match(p.name) and p.is_dir() and not p.is_symlink()
     ]
     candidates.sort(key=_log_dir_start_time, reverse=True)
@@ -578,17 +569,24 @@ def find_log_dir(launch_file: str, last_nth_zero_based: int):
     log_dir = candidates[last_nth_zero_based].resolve()
     return log_dir
 
-def sync_logs(launch_file: str, uuid: str = "latest"):
+def get_log_dir_from_launch(launch_file: str):
     machines = _get_machines_from_launch(Path(launch_file))
+    return Path(remote_expandvars(machines["local"], "${ROS_LOG_DIR}"))
+
+def sync_logs(local_log_dir: Path):
+    local_log_dir = local_log_dir.resolve()
+    local_log_dir.mkdir(exist_ok=True)
+
+    launch_file = next((f for f in local_log_dir.glob("*.launch") if f.is_file()), None)
+    if not launch_file:
+        raise ValueError(f"No *.launch file found in {local_log_dir}")
+
+    machines = _get_machines_from_launch(launch_file)
 
     by_machine: Dict[Machine, List[str]] = {}
     for machine_name, machine in machines.items():
         machine = machine.reduce_local()
         by_machine.setdefault(machine, []).append(machine_name)
-
-    local_log_dir = remote_expandvars(machines["local"], "${ROS_LOG_DIR}")
-    local_log_dir = (Path(local_log_dir) / uuid).resolve()
-    local_log_dir.mkdir(exist_ok=True)
 
     with ssh_multiplexing():
         for machine, machine_names in by_machine.items():
@@ -608,7 +606,7 @@ def sync_logs(launch_file: str, uuid: str = "latest"):
             if not path.exists():
                 path.symlink_to(link, True)
 
-__all__ = ["sync", "run_remote_task", "find_log_dir", "sync_logs"]
+__all__ = ["sync", "run_remote_task", "sync_logs"]
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
